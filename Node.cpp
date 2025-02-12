@@ -11,6 +11,7 @@ Node::Node(char k, std::string chrom, std::vector<unsigned int> pos, std::vector
     }
     this->k = k;
     std::string nodeID = createNodeID(chrom, pos, suffix);
+    this->chr = chrom;
     this->nodeID = nodeID;
 }
 
@@ -20,12 +21,12 @@ std::string Node::ID(){
 }
 
 
-const std::vector<std::string>& Node::posArr(){
+const std::vector<std::string>& Node::posArr() const {
     return pos_arr;
 }
 
 
-const std::vector<std::string>& Node::baseArr(){
+const std::vector<std::string>& Node::baseArr() const {
     return base_arr;
 }
 

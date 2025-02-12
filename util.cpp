@@ -3,8 +3,11 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <fstream>
 
 #include "util.hpp"
+
+std::vector<std::string> edgeColors = {"red", "blue", "green", "orange", "yellow", "purple"}; 
 
 std::string joinStringVector(const std::vector<std::string>& elements, const std::string& separator) {
     std::string result;
@@ -74,4 +77,17 @@ int distanceBetweenElements(const std::vector<uint>& list, std::string elem1, st
     uint e1 = std::stoul(elem1);  // Converts string to unsigned int
     uint e2 = std::stoul(elem2); 
     return distanceBetweenElements(list, e1, e2);
+}
+
+
+void writeToFile(std::string filename, std::vector<std::string> content) {
+    // Open the file (it will create the file if it doesn't exist)
+    std::ofstream outFile(filename);
+
+    if (outFile.is_open()) {
+        for (const auto& line : content) { // Assuming `lines` is a collection of strings
+            outFile << line << '\n';
+        }
+        outFile.close();
+    }
 }

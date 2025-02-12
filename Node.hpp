@@ -9,8 +9,8 @@ class Node {
     public:
         Node(char k, std::string chrom, std::vector<unsigned int> pos, std::vector<std::string> bases, std::string suffix="");
         std::string ID();
-        const std::vector<std::string>& posArr();
-        const std::vector<std::string>& baseArr();
+        const std::vector<std::string>& posArr() const;
+        const std::vector<std::string>& baseArr() const;
         const std::string& chrom();
         ~Node();
         void print();
@@ -18,7 +18,7 @@ class Node {
         char k;
         std::string nodeID;
         std::string chr;
-        std::vector<std::string> pos_arr;
+        std::vector<std::string> pos_arr; // 0-based, unlike the vcf file
         std::vector<std::string> base_arr;
 
 };
