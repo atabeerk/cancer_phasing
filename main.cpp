@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <string>
 
+#include <cxxopts.hpp>
+
 #include "Node.hpp"
 #include "Graph.hpp"
 #include "connectSNVs.hpp"
@@ -10,41 +12,55 @@
 #include "config.hpp"
 
 
+
 int main(int argc, char* argv[]) {
-    if (argc < 4) {
-        std::cout << "Usage: " << argv[0] << " <VCF file> <list of BAM files> <output folder>" << std::endl;
+    std::string vcfPath;
+    std::vector<std::string> bamFiles;
+    std::string outDir;
+    int k;
+    try {
+        cxxopts::Options options("CancerPhaser", "de Bruijn inspired phasing of cancer clones using SNVs and BAM files");
+
+        options.add_options()
+            ("vcf", "Path to VCF file", cxxopts::value<std::string>())
+            ("bam", "Paths to BAM files", cxxopts::value<std::vector<std::string>>())
+            ("out-dir", "Output directory", cxxopts::value<std::string>())
+            ("k", "K value", cxxopts::value<int>())
+            ("h,help", "Print help");
+
+        auto result = options.parse(argc, argv);
+
+        if (result.count("help")) {
+            std::cout << options.help() << std::endl;
+            return 0;
+        }
+
+        vcfPath = result["vcf"].as<std::string>();
+        bamFiles = result["bam"].as<std::vector<std::string>>();
+        outDir = result["out-dir"].as<std::string>();
+        k = result["k"].as<int>();
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error parsing options: " << e.what() << std::endl;
         return 1;
     }
 
-    // 1. VCF file (first argument)
-    std::string vcfFile = argv[1];
-    std::cout << "VCF File:\n  - " << vcfFile << std::endl;
+    Config::getInstance().setOutputDir(outDir);
 
-    // 2. List of BAM files (second argument onwards, excluding last argument)
-    std::vector<std::string> bamFiles;
-    for (int i = 2; i < argc - 1; ++i) {
-        bamFiles.push_back(argv[i]);
+    // Log input parameters
+    Config::getInstance().log("=== Program Inputs ===\n");
+    Config::getInstance().log("VCF: " + vcfPath + "\n");
+    Config::getInstance().log("Output Directory: " + outDir + "\n");
+    Config::getInstance().log("k: " + std::to_string(k) + "\n");
+    Config::getInstance().log("BAM files:\n");
+    for (const auto& bam : bamFiles) {
+        Config::getInstance().log("  " + bam + "\n");
     }
+    Config::getInstance().log("======================\n");
 
-    // Print BAM files
-    if (bamFiles.size() > 6) {
-        std::cout << "WARNING! only " << edgeColors.size() << " colors"
-                  << "are used to draw graph edges but you provided "
-                  << bamFiles.size() << " bam files." << std::endl;
-    }
-    std::cout << "BAM Files:" << std::endl;
-    for (const auto& bamFile : bamFiles) {
-        std::cout << "  - " << bamFile << std::endl;
-    }
-
-    // 3. Output folder (last argument)
-    std::string dir = argv[argc - 1];
-    std::cout << "Output Folder: " << dir << std::endl;
-
-    Config::getInstance().setOutputDir(dir);
-
-    Graph g = Graph(5);
-    g.populateGraph(vcfFile);
+    // Start processing
+    Graph g = Graph(k);
+    g.populateGraph(vcfPath);
     for (uint i = 0; i < bamFiles.size(); i++){
         findConnectedSNVs(bamFiles[i], g, edgeColors[i % edgeColors.size()]);
     }
