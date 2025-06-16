@@ -13,6 +13,7 @@
 #include "Node.hpp"
 #include "Graph.hpp"
 #include "util.hpp"
+#include "config.hpp"
 
 
 bool readSupportsAllele(const ReadInfo& read, const Node& node) {
@@ -20,7 +21,7 @@ bool readSupportsAllele(const ReadInfo& read, const Node& node) {
 
     for (const auto& snv : read.SNVs) {
         for (size_t i = 0; i < node.posArr().size(); i++) {
-            if (snv.pos == std::stoi(node.posArr()[i])) {
+            if (snv.pos == std::stoi(node.posArr()[i])) { // this can be improved
                 char read_base = std::toupper(static_cast<unsigned char>(snv.base[0]));
                 char allele_base = std::toupper(static_cast<unsigned char>(node.baseArr()[i][0]));
                 if (read_base == allele_base) {
@@ -53,8 +54,19 @@ void connectGraphNodes(const std::map<std::string, ReadInfo>& read_data, Graph& 
         for (int i = 0; i < SNVsInRange.size() - k + 1 && SNVsInRange.size() > k; i++) {
             k_SNVs.assign(SNVsInRange.begin() + i, SNVsInRange.begin() + i + k);
 
+            std::vector<Node *> SNVnodes;
             // Get the two nodes corresponding to this SNV position
-            std::vector<Node *> SNVnodes = g.getSNVNodes(read.chrom, k_SNVs);
+            try {
+                SNVnodes = g.getSNVNodes(read.chrom, k_SNVs);
+            } catch (const std::exception& e) {
+                Config::getInstance().log("Exception while getting node for read: " + readName);
+                Config::getInstance().log("Chromosome: " + read.chrom);
+                Config::getInstance().log("Exception message: " + std::string(e.what()));
+                Config::getInstance().log("SNVs: ");
+                for (const auto& snv : k_SNVs) {
+                    Config::getInstance().log("\tPosition: " + std::to_string(snv));
+                }
+            }
 
             nodesInRange.insert(nodesInRange.begin(), SNVnodes.begin(), SNVnodes.end());
         }
@@ -95,21 +107,19 @@ void findConnectedSNVs(const std::string& bamFilePath, Graph& graph, std::string
         }
     }
 
-    std::string regionListFile = "regionList.txt";
-    std::string mpileupPath = "mpileup.out";
+    std::string regionListFile = Config::getInstance().getOutputDir() + "/regionList.txt";
+    std::string mpileupPath = Config::getInstance().getOutputDir() + "/mpileup.out";
     writeToFile(regionListFile, regionLines);
     executeMpileupCmd(bamFilePath, regionListFile, mpileupPath);
     std::map<std::string, ReadInfo> read_data = readMpileupOutput(mpileupPath);
     // printParsedMpileupOutput(read_data);
     connectGraphNodes(read_data, graph, edgeColor);
-
-    std::remove(regionListFile.c_str());
 }
 
 
 void executeMpileupCmd(std::string bamFilePath, std::string regionListFile, std::string mpileupPath) {
     // Run the command
-    std::string command = "samtools mpileup -q 20 -Q 20 -O --output-QNAME --output-extra POS,RLEN -l " + regionListFile +
+    std::string command = "samtools mpileup -Q 0 -q 0 -O --output-QNAME --output-extra POS,RLEN -l " + regionListFile +
                           " " + bamFilePath + " -o " + mpileupPath;
     int ret_code = system(command.c_str());
 
@@ -138,7 +148,7 @@ std::map<std::string, ReadInfo> readMpileupOutput(std::string filename) {
         std::istringstream ss(line);
         std::string chromosome, reference_position_str, bases, base_positions_str, read_names, skip, start_pos_str, rlen_str;
 
-        // Read columns and skip the 3rd and 6th columns as specified
+        // Read columns and skip some
         std::getline(ss, chromosome, '\t');             // Column 1: Chromosome
         std::getline(ss, reference_position_str, '\t'); // Column 2: Reference position
         std::getline(ss, skip, '\t');                   // Column 3: Reference base

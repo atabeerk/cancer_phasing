@@ -20,15 +20,47 @@ Graph::Graph(unsigned int k) {
 }
 
 
-void Graph::addSNV(std::string chrom, std::vector<unsigned int> pos, std::vector<std::string> ref, std::vector<std::string> alt) {
+void logHaplotypeMap(const std::vector<std::string>& bases,
+                     const std::vector<std::string>& pos,
+                     const std::string& hapID) {
+    Config::getInstance().log(hapID);
+    for (size_t i = 0; i < bases.size(); ++i) {
+        Config::getInstance().log("\t" + pos[i] + ":" + bases[i]);
+    }
+    Config::getInstance().log("\n");
+}
+
+
+void Graph::addSNV(const std::string& chrom,
+                   const std::vector<unsigned int>& pos,
+                   const std::vector<std::string>& ref,
+                   const std::vector<std::string>& alt) {
     /*
-    Adding an SNV to the graph constitutes of adding two independent nodes,
-    one for each hapltype (ref/alt). Positioins of the two node objects will be
-    the same but bases on these positions will be different.
+    Adds all combinations of ref/alt alleles as separate nodes to the graph.
+    Each combination represents a possible haplotype.
     */
 
-    addNode(chrom, pos, ref, "H1");
-    addNode(chrom, pos, alt, "H2");
+    if (pos.empty() || ref.size() != pos.size() || alt.size() != pos.size()) {
+        throw std::invalid_argument("SNV input vectors must be the same size and non-empty.");
+    }
+
+    size_t n = pos.size();
+    size_t num_combinations = 1 << n; // 2^n combinations
+
+    for (size_t i = 0; i < num_combinations; ++i) {
+        std::vector<std::string> hap;
+        for (size_t j = 0; j < n; ++j) {
+            // If bit j is set, use alt[j]; else, use ref[j]
+            if (i & (1 << j)) {
+                hap.push_back(alt[j]);
+            } else {
+                hap.push_back(ref[j]);
+            }
+        }
+        // Label each combination with a haplotype ID like H0, H1, ...
+        std::string hapID = "H" + std::to_string(i);
+        addNode(chrom, pos, hap, hapID);
+    }
 
     orderedSNVs.push_back(pos[0]);
 }
@@ -44,17 +76,23 @@ void Graph::addNode(std::string chrom, std::vector<unsigned int> pos, std::vecto
     orderedNodes.push_back(n->ID());
 
     nodeCount++;
+    logHaplotypeMap(n->baseArr(), n->posArr(), n->ID());
 }
 
 
-std::vector<Node*> Graph::getSNVNodes(std::string chrom, std::vector<unsigned int> pos){
-    /*
-    Returns both nodes that correspond to the position in the nodeID
-    */
-    Node* node1 = getNode(chrom, pos, "H1");
-    Node* node2 = getNode(chrom, pos, "H2");
-    std::vector<Node*> v = {node1, node2};
-    return v;
+std::vector<Node*> Graph::getSNVNodes(const std::string& chrom, const std::vector<unsigned int>& pos) {
+    std::vector<Node*> nodes;
+    size_t num_haplotypes = 1 << this->k;  // 2^k
+
+    for (size_t i = 0; i < num_haplotypes; ++i) {
+        std::string hapID = "H" + std::to_string(i);
+        Node* node = getNode(chrom, pos, hapID);
+        if (node != nullptr) {
+            nodes.push_back(node);
+        }
+    }
+
+    return nodes;
 }
 
 
@@ -101,6 +139,39 @@ int Graph::getMaxWeightedEdge(const std::string& nodeID, const std::string& edge
 
 
 /*
+Used in the Graph::populateGraph() function to determine if a record is
+heterozygous and filter it out if not. This function checks the genotype (GT)
+field of the first two samples in a BCF record. 
+*/
+bool any_sample_is_heterozygous(bcf_hdr_t* hdr, bcf1_t* rec) {
+    int* gt_arr = nullptr;
+    int ngt_arr = 0;
+
+    // Get GT field
+    int ngt = bcf_get_genotypes(hdr, rec, &gt_arr, &ngt_arr);
+    if (ngt <= 1) {
+        free(gt_arr);
+        return false;
+    }
+
+    int nsamples = bcf_hdr_nsamples(hdr);
+
+    for (int i = 0; i < nsamples; ++i) {
+        int allele1 = bcf_gt_allele(gt_arr[i * 2]);
+        int allele2 = bcf_gt_allele(gt_arr[i * 2 + 1]);
+
+        // Heterozygous: both are numbers and not equal
+        if (allele1 >= 0 && allele2 >= 0 && allele1 != allele2) {
+            free(gt_arr);
+            return true;
+        }
+    }
+
+    free(gt_arr);
+    return false;
+}
+
+/*
 Given a vcf file, populates the graph with nodes corresponding to SNVs.
 Each SNV position corresponds to two nodes (one for each haplotype).
 */
@@ -110,11 +181,11 @@ void Graph::populateGraph(std::string bcf_file_path){
     bcf1_t *test_record = bcf_init();
     test_bcf = bcf_open(bcf_file_path.c_str(), "r");
     if(test_bcf == NULL) {
-        throw std::runtime_error("Unable to open file.");
+        throw std::runtime_error("Unable to open BCF file.");
     }
     test_header = bcf_hdr_read(test_bcf);
     if(test_header == NULL) {
-        throw std::runtime_error("Unable to read header.");
+        throw std::runtime_error("Unable to read BCF header.");
     }
 
     uint j = 0;
@@ -140,9 +211,13 @@ void Graph::populateGraph(std::string bcf_file_path){
         std::string ref = test_record->d.allele[0];
         std::string alt = test_record->d.allele[1];
 
-        // Check if the variant is a SNP (both REF and ALT must have length 1)
-        if (ref.length() != 1 || alt.length() != 1) {
-            continue; // Skip non-SNPs
+        if ( // Skip non-SNPs, low quality, or non-heterozygous
+            ref.length() != 1 ||
+            alt.length() != 1 ||
+            test_record->qual < 20 ||
+            !any_sample_is_heterozygous(test_header, test_record)
+        ) {
+            continue;
         }
 
         std::string region = bcf_hdr_id2name(test_header, test_record->rid);
@@ -167,8 +242,11 @@ void Graph::populateGraph(std::string bcf_file_path){
     bcf_hdr_destroy(test_header);
     bcf_destroy(test_record); 
     bcf_close(test_bcf);
-    std::cout << ".vcf file parsed, number of nodes in the graph: ";
-    std::cout << getNodeCount() << std::endl;
+    Config::getInstance().log("VCF file parsed, number of nodes in the graph: " + getNodeCount());
+    Config::getInstance().log("Nodes:");
+    for (const auto& pair : nodes) {
+        Config::getInstance().log("\t" + pair.first);
+    }
 }
 
 
@@ -254,26 +332,48 @@ void Graph::printAdjList() {
 }
 
 
-void Graph::exportToDot(const std::string& filename) {
-    std::string tmp_file = "tmp_file.dot";
+void Graph::exportToDot() {
+    std::string output_folder = Config::getInstance().getOutputDir();
+    std::string tmp_file = output_folder + "/graph_tmp.dot";
     std::ofstream file(tmp_file);
     file << "graph G {\n";  // use "graph G" for undirected, "digraph G" for directed
     // file << "   graph [dpi = 300];\n";
-    file << "   rankdir=LR;\n";
+    file << "   rankdir=RL;\n";
 
-    int h1_index = 0, h2_index = 0;  // Track x-coordinates for H1 and H2 nodes
-    const int h1_y = 1;  // Fixed y-coordinate for H1 line
-    const int h2_y = -1; // Fixed y-coordinate for H2 line
-
-    // Assign positions and colors to H1 and H2 nodes
+    // Step 1: Group nodes by position
+    std::map<std::string, std::vector<std::string>> pos_to_nodes;
     for (const auto& node : orderedNodes) {
-        if (endsWith(node, "H1")) {
-            file << "    \"" << node << "\" [pos=\"" << h1_index * 3 << "," << h1_y << "!\", color=blue, style=filled, fillcolor=lightblue];\n";
-            h1_index++;  // Increment x-coordinate for the next H1 node
-        } else if (endsWith(node, "H2")) {
-            file << "    \"" << node << "\" [pos=\"" << h2_index * 3 << "," << h2_y << "!\", color=red, style=filled, fillcolor=pink];\n";
-            h2_index++;  // Increment x-coordinate for the next H2 node
+        std::string pos = getNode(node)->posArr()[0];  // assume it's a string like "12345"
+        pos_to_nodes[pos].push_back(node);
+    }
+
+    // Step 2: Assign positions per SNV (shared x, stacked y)
+    int x_index = 0;
+    const int y_spacing = 2;
+
+    for (const auto& [pos, nodeList] : pos_to_nodes) {
+        int y_index = 0;
+        for (const auto& node : nodeList) {
+            int y = y_index * y_spacing;
+
+            std::string fillcolor = "white"; // default
+
+            // Extract haplotype index from node name (e.g., H0, H1, H2...)
+            size_t h_idx = node.find("H");
+            if (h_idx != std::string::npos) {
+                std::string hapStr = node.substr(h_idx + 1);
+                try {
+                    int hapIndex = std::stoi(hapStr);
+                    fillcolor = colorPalette[hapIndex % colorPalette.size()];
+                } catch (...) {
+                    fillcolor = "white"; // fallback
+                }
+            }
+
+            file << "    \"" << node << "\" [pos=\"" << x_index * 3 << "," << y << "!\", style=filled, fillcolor=" << fillcolor << "];\n";
+            y_index++;
         }
+        x_index++;
     }
     
     // Iterate over the adjacency list
@@ -284,16 +384,14 @@ void Graph::exportToDot(const std::string& filename) {
 
         // Iterate through neighbors
         for (std::map<std::string, std::map<std::string, int>>::const_iterator jt = outNeighbors.begin(); jt != outNeighbors.end(); ++jt) {
-            
             const std::string& neighborID = jt->first;
             std::string neighborPos = getNode(neighborID)->posArr()[0];
 
             const std::map<std::string, int> edges = jt->second;
 
-            // Only create edges between subsequent SNV positions. Because there are
-            // H1 and H2 nodes, we check if difference between the indices is less than 2 (instead of 1)
-            if (distanceBetweenElements(orderedSNVs, nodePos, neighborPos) < 2) {
-                // Iterate over out edges from the current node, jt-> first stores the out edges.
+            // Only create edges between subsequent SNV positions.
+            if (distanceBetweenElements(orderedSNVs, nodePos, neighborPos) <= this->k) {
+                // Iterate over out edges from the current node, jt->first stores the out edges.
                 for (std::map<std::string, int>::const_iterator  kt = edges.begin(); kt != edges.end(); ++kt) {
                     std::string edgeColor = kt->first;
                     int weight = kt->second;
@@ -301,10 +399,11 @@ void Graph::exportToDot(const std::string& filename) {
                     int maxOutWeight = getMaxWeightedEdge(nodeID, edgeColor, "out");
                     int maxInWeight = getMaxWeightedEdge(neighborID, edgeColor, "in");
                     
-                    if (weight * 5 >= maxOutWeight) {
+                    if (weight * 5 >= maxOutWeight && weight > 1) {
                         // Writing edges with weight as label
                         file << "    \"" << nodeID << "\" -- \"" << neighborID << "\" [label=\"" << weight << "\" color=\"" << edgeColor << "\"];\n";
                     }
+                // file << "    \"" << nodeID << "\" -- \"" << neighborID << "\" [label=\"" << weight << "\" color=\"" << edgeColor << "\"];\n";
                 }
             }
         }
@@ -312,15 +411,13 @@ void Graph::exportToDot(const std::string& filename) {
     file << "}\n";
     file.close();
 
-    
+    std::cout << "Converting graph from DOT to SVG format..." << std::endl;
+    std::string filename = Config::getInstance().getOutputDir() + "/graph.svg";
     std::string png_convert_cmd = "dot -Tsvg " + tmp_file + " -o " + filename;
     if (system(png_convert_cmd.c_str()) != 0) {
         std::cerr << "Error converting graph from .dot" << std::endl;
     } else {
         std::cout << "Graph exported to " << filename << std::endl;
     }
-    // std::remove(tmp_file.c_str());
-
-    
 }
 

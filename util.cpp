@@ -6,6 +6,7 @@
 #include <fstream>
 
 #include "util.hpp"
+#include "config.hpp"
 
 std::vector<std::string> edgeColors = {"red", "blue", "green", "orange", "yellow", "purple"}; 
 
@@ -60,6 +61,7 @@ int findIndex(std::vector<std::string>vec , std::string elem) {
 }
 
 int distanceBetweenElements(const std::vector<uint>& list, uint elem1, uint elem2) {
+    //shoudl be based on k
     // Find the iterators pointing to the elements
     auto it1 = std::find(list.begin(), list.end(), elem1);
     auto it2 = std::find(list.begin(), list.end(), elem2);
@@ -81,7 +83,7 @@ int distanceBetweenElements(const std::vector<uint>& list, std::string elem1, st
 
 
 void writeToFile(std::string filename, std::vector<std::string> content) {
-    // Open the file (it will create the file if it doesn't exist)
+    // Open the file, create if it doesn't exist
     std::ofstream outFile(filename);
 
     if (outFile.is_open()) {

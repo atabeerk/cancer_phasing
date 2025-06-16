@@ -6,11 +6,12 @@
 #include <utility>
 
 #include "Node.hpp"
+#include "config.hpp"
 
 class Graph {
     public:
         Graph(unsigned int k);
-        void addSNV(std::string chrom, std::vector<unsigned int> pos, std::vector<std::string> ref, std::vector<std::string> alt);
+        void addSNV(const std::string& chrom, const std::vector<unsigned int>& pos, const std::vector<std::string>& ref, const std::vector<std::string>& alt);
         void addNode(std::string chrom, std::vector<unsigned int> pos, std::vector<std::string> bases, std::string suffix);
         void addEdge(std::string node1, std::string node2, int weight=1, std::string edgeColor="black", std::string direction="out");
 
@@ -19,7 +20,7 @@ class Graph {
         Node* getNode(std::string chrom, std::vector<unsigned int> pos, std::string suffix);
         Node* getNode(std::string nodeID);
         std::vector<uint> getOrderedSNVs();
-        std::vector<Node*> getSNVNodes(std::string chrom, std::vector<unsigned int> pos);
+        std::vector<Node*> getSNVNodes(const std::string& chrom, const std::vector<unsigned int>& pos);
         int getMaxWeightedEdge(const std::string& nodeID, const std::string& edgeColor, const std::string& direction);
         
         void populateGraph(std::string bcf_file_path);
@@ -27,8 +28,7 @@ class Graph {
 
         void printNodes();
         void printAdjList();
-        void exportToDot(const std::string& filename);
-
+        void exportToDot();
         std::map<std::string, Node *> getNodes();
     private:
         static unsigned int nodeCount;
