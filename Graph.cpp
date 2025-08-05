@@ -214,8 +214,8 @@ void Graph::populateGraph(std::string bcf_file_path){
         if ( // Skip non-SNPs, low quality, or non-heterozygous
             ref.length() != 1 ||
             alt.length() != 1 ||
-            test_record->qual < 20 ||
-            !any_sample_is_heterozygous(test_header, test_record)
+            test_record->qual < 20 
+            // !any_sample_is_heterozygous(test_header, test_record)
         ) {
             continue;
         }
@@ -337,41 +337,41 @@ void Graph::exportToDot() {
     std::string tmp_file = output_folder + "/graph_tmp.dot";
     std::ofstream file(tmp_file);
     file << "graph G {\n";  // use "graph G" for undirected, "digraph G" for directed
+    file << "   layout=neato;\n";
+    // file << "   overlap=false;\n";  // optional, to avoid overlapping nodes
+    file << "   splines=false;\n";   // optional, smooth edges
     // file << "   graph [dpi = 300];\n";
-    file << "   rankdir=RL;\n";
+    // file << "   rankdir=RL;\n";
 
-    // Step 1: Group nodes by position
+    // Step 1: Group nodes by SNV position in order of appearance in orderedNodes
     std::map<std::string, std::vector<std::string>> pos_to_nodes;
+    std::vector<std::string> sortedSNVs;  // keep track of order
+
     for (const auto& node : orderedNodes) {
-        std::string pos = getNode(node)->posArr()[0];  // assume it's a string like "12345"
+        std::string pos = getNode(node)->posArr()[0];
+
+        // If this is the first time seeing this SNV position, record order
+        if (pos_to_nodes.find(pos) == pos_to_nodes.end()) {
+            sortedSNVs.push_back(pos);
+        }
+
         pos_to_nodes[pos].push_back(node);
     }
 
-    // Step 2: Assign positions per SNV (shared x, stacked y)
+    // Step 2: Layout nodes horizontally by SNV, vertically by haplotype
+    const int x_spacing = 300;
+    const int y_spacing = 100;
+
     int x_index = 0;
-    const int y_spacing = 2;
+    for (const auto& snv : sortedSNVs) {
+        const auto& nodeList = pos_to_nodes[snv];
 
-    for (const auto& [pos, nodeList] : pos_to_nodes) {
-        int y_index = 0;
-        for (const auto& node : nodeList) {
-            int y = y_index * y_spacing;
+        for (size_t i = 0; i < nodeList.size(); ++i) {
+            const std::string& node = nodeList[i];
+            int x = x_index * x_spacing;
+            int y = i * y_spacing;
 
-            std::string fillcolor = "white"; // default
-
-            // Extract haplotype index from node name (e.g., H0, H1, H2...)
-            size_t h_idx = node.find("H");
-            if (h_idx != std::string::npos) {
-                std::string hapStr = node.substr(h_idx + 1);
-                try {
-                    int hapIndex = std::stoi(hapStr);
-                    fillcolor = colorPalette[hapIndex % colorPalette.size()];
-                } catch (...) {
-                    fillcolor = "white"; // fallback
-                }
-            }
-
-            file << "    \"" << node << "\" [pos=\"" << x_index * 3 << "," << y << "!\", style=filled, fillcolor=" << fillcolor << "];\n";
-            y_index++;
+            file << "    \"" << node << "\" [pos=\"" << x << "," << y << "!\", style=filled, fillcolor=lightblue];\n";
         }
         x_index++;
     }
@@ -390,7 +390,9 @@ void Graph::exportToDot() {
             const std::map<std::string, int> edges = jt->second;
 
             // Only create edges between subsequent SNV positions.
-            if (distanceBetweenElements(orderedSNVs, nodePos, neighborPos) <= this->k) {
+            int visRange = Config::getInstance().getMaxHopMultiplier() * k;
+            uint16_t nodeDist = distanceBetweenElements(orderedSNVs, nodePos, neighborPos);
+            if (nodeDist <= visRange) {
                 // Iterate over out edges from the current node, jt->first stores the out edges.
                 for (std::map<std::string, int>::const_iterator  kt = edges.begin(); kt != edges.end(); ++kt) {
                     std::string edgeColor = kt->first;
@@ -413,7 +415,7 @@ void Graph::exportToDot() {
 
     std::cout << "Converting graph from DOT to SVG format..." << std::endl;
     std::string filename = Config::getInstance().getOutputDir() + "/graph.svg";
-    std::string png_convert_cmd = "dot -Tsvg " + tmp_file + " -o " + filename;
+    std::string png_convert_cmd = "neato -n2 -Tsvg " + tmp_file + " -o " + filename;
     if (system(png_convert_cmd.c_str()) != 0) {
         std::cerr << "Error converting graph from .dot" << std::endl;
     } else {
