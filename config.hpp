@@ -12,12 +12,17 @@ public:
 
     void setOutputDir(const std::string& dir);
     std::string getOutputDir() const;
+    
     void log(const std::string& message);
+
+    void setMaxHopMultiplier(int value);
+    int getMaxHopMultiplier() const;
 
 private:
     Config() = default;
     std::string outputDir;
     std::ofstream logFile;
+    int maxHopMultiplier = 4;
 };
 
 extern const std::vector<std::string> colorPalette;

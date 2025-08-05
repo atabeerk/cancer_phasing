@@ -56,3 +56,11 @@ void Config::log(const std::string& message) {
         std::cerr << "Log file not open." << std::endl;
     }
 }
+
+void Config::setMaxHopMultiplier(int value) {
+    maxHopMultiplier = value;
+}
+
+int Config::getMaxHopMultiplier() const {
+    return maxHopMultiplier;
+}
