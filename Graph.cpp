@@ -6,6 +6,9 @@
 #include "htslib/vcf.h"
 #include "htslib/sam.h"
 
+#include "json.hpp"
+using json_t = nlohmann::json;
+
 #include "Graph.hpp"
 #include "util.hpp"
 
@@ -423,3 +426,96 @@ void Graph::exportToDot() {
     }
 }
 
+void Graph::exportToCytoscapeJSON() {
+    std::string output_folder = Config::getInstance().getOutputDir();
+    std::string json_file = output_folder + "/graph.json";
+    std::ofstream file(json_file);
+
+    if (!file.is_open()) {
+        std::cerr << "Failed to open file for writing: " << json_file << std::endl;
+        return;
+    }
+
+    json_t graph_json;
+    json_t nodes_json = json_t::array();
+    json_t edges_json = json_t::array();
+
+    // Step 1: Group nodes by SNV position
+    std::map<uint, std::vector<std::string>> pos_to_nodes;
+    for (const auto& node : orderedNodes) {
+        uint pos = static_cast<uint>(std::stoul(getNode(node)->posArr()[0]));
+        pos_to_nodes[pos].push_back(node);
+    }
+
+    const int k = getK();
+    const int maxHop = Config::getInstance().getMaxHopMultiplier();
+    const int x_spacing = 500;
+    const int y_spacing = 200;
+
+    std::map<std::string, std::pair<int, int>> node_positions;
+    int x_index = 0;
+
+    for (const auto& snv : orderedSNVs) {
+        if (pos_to_nodes.find(snv) == pos_to_nodes.end()) {
+            ++x_index;
+            continue;
+        }
+
+        const auto& nodeList = pos_to_nodes[snv];
+        for (size_t i = 0; i < nodeList.size(); ++i) {
+            const std::string& node = nodeList[i];
+            int x = x_index * x_spacing;
+            int y = i * y_spacing;
+            node_positions[node] = {x, y};
+
+            nodes_json.push_back({
+                {"data", {{"id", node}}},
+                {"position", {{"x", x}, {"y", y}}}
+            });
+        }
+        ++x_index;
+    }
+
+    for (const auto& nodeID : orderedNodes) {
+        const std::string& nodePos = getNode(nodeID)->posArr()[0];
+        const auto& outNeighbors = adjList.at(nodeID).first;
+
+        for (const auto& neighborEntry : outNeighbors) {
+            const std::string& neighborID = neighborEntry.first;
+            const std::string& neighborPos = getNode(neighborID)->posArr()[0];
+            const auto& edges = neighborEntry.second;
+
+            uint16_t nodeDist = distanceBetweenElements(orderedSNVs, nodePos, neighborPos);
+            int visRange = maxHop * k;
+            if (nodeDist <= visRange) {
+                for (const auto& edgeEntry : edges) {
+                    std::string edgeColor = edgeEntry.first;
+                    int weight = edgeEntry.second;
+
+                    int maxOutWeight = getMaxWeightedEdge(nodeID, edgeColor, "out");
+                    if (weight * 5 >= maxOutWeight && weight > 1) {
+                        std::string edgeID = nodeID + "_" + neighborID;
+
+                        edges_json.push_back({
+                            {"data", {
+                                {"id", edgeID},
+                                {"source", nodeID},
+                                {"target", neighborID},
+                                {"weight", weight},
+                                {"color", edgeColor}
+                            }}
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    graph_json["elements"]["nodes"] = nodes_json;
+    graph_json["elements"]["edges"] = edges_json;
+
+    file << graph_json.dump(4);  // Pretty print
+    file.close();
+
+    std::cout << "Graph exported to Cytoscape JSON at " << json_file << std::endl;
+}

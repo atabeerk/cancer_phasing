@@ -29,6 +29,8 @@ class Graph {
         void printNodes();
         void printAdjList();
         void exportToDot();
+        void exportToCytoscapeJSON();
+        
         std::map<std::string, Node *> getNodes();
     private:
         static unsigned int nodeCount;

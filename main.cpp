@@ -66,6 +66,7 @@ int main(int argc, char* argv[]) {
     }
 
     g.exportToDot();
+    g.exportToCytoscapeJSON();
 
     return 0;
 }
