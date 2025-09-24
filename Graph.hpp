@@ -24,10 +24,12 @@ class Graph {
         int getMaxWeightedEdge(const std::string& nodeID, const std::string& edgeColor, const std::string& direction);
         
         void populateGraph(std::string bcf_file_path);
-        void connectNodeGroup(const std::vector<Node *>& nodes, std::string edgeColor);
+        void connectNodeGroupAdj(const std::vector<Node *>& nodes, std::string edgeColor);
+        void connectNodeGroupAll(const std::vector<Node *>& nodes, std::string edgeColor);
 
         void printNodes();
         void printAdjList();
+        void printConnectivityStats();
         void exportToDot();
         void exportToCytoscapeJSON();
         

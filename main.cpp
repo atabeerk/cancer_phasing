@@ -65,8 +65,9 @@ int main(int argc, char* argv[]) {
         findConnectedSNVs(bamFiles[i], g, edgeColors[i % edgeColors.size()]);
     }
 
-    g.exportToDot();
+    g.printConnectivityStats();
     g.exportToCytoscapeJSON();
+    g.exportToDot();
 
     return 0;
 }

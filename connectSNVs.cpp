@@ -76,7 +76,7 @@ void connectGraphNodes(const std::map<std::string, ReadInfo>& read_data, Graph& 
                 nodesToConnect.push_back(node);
             }
         }
-        g.connectNodeGroup(nodesToConnect, edgeColor);
+        g.connectNodeGroupAll(nodesToConnect, edgeColor);
         i++;
     }
     std::cout << "Processed " << i << " reads for connection" << std::endl;

@@ -287,8 +287,24 @@ void Graph::addEdge(std::string node1, std::string node2, int weight, std::strin
     }
 }
 
+void Graph::connectNodeGroupAll(const std::vector<Node *>& nodes, std::string edgeColor){
+    /*
+    Connects all nodes in the list
+    */
+    if (nodes.empty()) {
+        return;
+    }
 
-void Graph::connectNodeGroup(const std::vector<Node *>& nodes, std::string edgeColor){
+    for (size_t i = 0; i < nodes.size(); i++) {
+        for (size_t j = i + 1; j < nodes.size(); j++) {
+            addEdge(nodes[i]->ID(), nodes[j]->ID(), 1, edgeColor, "out");
+            addEdge(nodes[j]->ID(), nodes[i]->ID(), 1, edgeColor, "in");
+        }
+    }
+}
+
+
+void Graph::connectNodeGroupAdj(const std::vector<Node *>& nodes, std::string edgeColor){
     /*
     Only connects subsequentnodes in the list
     E.g., For [n1, n2, n3],  n1-n2 and n2-n3 are connencted
@@ -335,6 +351,121 @@ void Graph::printAdjList() {
 }
 
 
+#include <unordered_set>
+
+void Graph::printConnectivityStats() {
+    size_t n = 1 << k;  // 2^k nodes per group
+    size_t totalGroups = orderedNodes.size() / n;
+
+    std::unordered_set<std::string> connectedNodeIDs;
+    unsigned int connectedGroups = 0;
+    uint totalConnectedLength = 0;
+
+    // total genomic region
+    uint totalRegionLength = 0;
+    if (!orderedNodes.empty()) {
+        Node* firstNode = nodes.at(orderedNodes.front());
+        Node* lastNode  = nodes.at(orderedNodes.back());
+        totalRegionLength = std::stoul(lastNode->posArr().back()) -
+                            std::stoul(firstNode->posArr().front()) + 1;
+    }
+
+    size_t ng = 0;
+    while (ng + 1 < totalGroups) {
+        size_t startCurr = n * ng;
+        size_t endCurr = startCurr + n;
+        size_t startNext = n * (ng + 1);
+        size_t endNext = startNext + n;
+
+        uint chainStart = std::stoul(nodes.at(orderedNodes[startCurr])->posArr().front());
+        uint chainEnd = std::stoul(nodes.at(orderedNodes[startCurr])->posArr().back());
+        bool chainActive = false;
+
+        size_t currentNg = ng;
+
+        while (currentNg + 1 < totalGroups) {
+            bool groupsConnected = false;
+            bool currentGroupConnected = false;
+
+            startCurr = n * currentNg;
+            endCurr = startCurr + n;
+            startNext = n * (currentNg + 1);
+            endNext = startNext + n;
+
+            // iterate all nodes in current group
+            for (size_t i = startCurr; i < endCurr; i++) {
+                const std::string& currID = orderedNodes[i];
+                Node* currNode = nodes.at(currID);
+
+                auto it = adjList.find(currID);
+                if (it == adjList.end()) continue;
+
+                const auto& inEdges = it->second.second; // use inedges now
+
+                // check each neighbor
+                for (const auto& neighborKV : inEdges) {
+                    const std::string& neighborID = neighborKV.first;
+                    const auto& colorMap = neighborKV.second;
+
+                    // print all edges
+                    for (const auto& colorKV : colorMap) {
+                        const std::string& edgeColor = colorKV.first;
+                        int weight = colorKV.second;
+                        std::cout << "Checking in-edge: " << currID
+                                  << " <- " << neighborID
+                                  << " (color: " << edgeColor
+                                  << ", weight: " << weight << ")" << std::endl;
+                    }
+
+                    // check if neighbor is in the next group
+                    for (size_t j = startNext; j < endNext; j++) {
+                        if (orderedNodes[j] == neighborID) {
+                            groupsConnected = true;
+                            currentGroupConnected = true;
+
+                            connectedNodeIDs.insert(currID);
+
+                            Node* lastNodeNextGroup = nodes.at(orderedNodes[endNext - 1]);
+                            chainEnd = std::stoul(lastNodeNextGroup->posArr().back());
+
+                            std::cout << "Group " << currentNg
+                                      << " is connected to group " << (currentNg + 1)
+                                      << std::endl;
+                        }
+                    }
+                }
+            }
+
+            if (groupsConnected) {
+                chainActive = true;
+                if (currentGroupConnected) connectedGroups++;
+                currentNg++;  // move to next group in chain
+            } else {
+                break; // no more consecutive connections
+            }
+        }
+
+        if (chainActive) {
+            std::cout << "Connected chain from " << chainStart
+                      << " to " << chainEnd << std::endl;
+            totalConnectedLength += (chainEnd - chainStart + 1);
+        }
+
+        ng = currentNg + 1; // move to next unprocessed group
+    }
+
+    std::cout << "Connected nodes: " << connectedNodeIDs.size() << "/" << nodes.size()
+              << " (" << (100.0 * connectedNodeIDs.size() / nodes.size()) << "%)" << std::endl;
+
+    std::cout << "Connected groups: " << connectedGroups << "/" << totalGroups
+              << " (" << (100.0 * connectedGroups / totalGroups) << "%)" << std::endl;
+
+    std::cout << "Connected region length: " << totalConnectedLength
+              << " / Total region length: " << totalRegionLength
+              << " (" << (100.0 * totalConnectedLength / totalRegionLength) << "%)" << std::endl;
+}
+
+
 void Graph::exportToDot() {
     std::string output_folder = Config::getInstance().getOutputDir();
     std::string tmp_file = output_folder + "/graph_tmp.dot";
@@ -342,7 +473,7 @@ void Graph::exportToDot() {
     file << "graph G {\n";  // use "graph G" for undirected, "digraph G" for directed
     file << "   layout=neato;\n";
     // file << "   overlap=false;\n";  // optional, to avoid overlapping nodes
-    file << "   splines=false;\n";   // optional, smooth edges
+    file << "   splines=spline;\n";   // optional, smooth edges
     // file << "   graph [dpi = 300];\n";
     // file << "   rankdir=RL;\n";
 
@@ -395,7 +526,7 @@ void Graph::exportToDot() {
             // Only create edges between subsequent SNV positions.
             int visRange = Config::getInstance().getMaxHopMultiplier() * k;
             uint16_t nodeDist = distanceBetweenElements(orderedSNVs, nodePos, neighborPos);
-            if (nodeDist <= visRange) {
+            // if (nodeDist <= visRange) {
                 // Iterate over out edges from the current node, jt->first stores the out edges.
                 for (std::map<std::string, int>::const_iterator  kt = edges.begin(); kt != edges.end(); ++kt) {
                     std::string edgeColor = kt->first;
@@ -404,13 +535,13 @@ void Graph::exportToDot() {
                     int maxOutWeight = getMaxWeightedEdge(nodeID, edgeColor, "out");
                     int maxInWeight = getMaxWeightedEdge(neighborID, edgeColor, "in");
                     
-                    if (weight * 5 >= maxOutWeight && weight > 1) {
-                        // Writing edges with weight as label
-                        file << "    \"" << nodeID << "\" -- \"" << neighborID << "\" [label=\"" << weight << "\" color=\"" << edgeColor << "\"];\n";
-                    }
-                // file << "    \"" << nodeID << "\" -- \"" << neighborID << "\" [label=\"" << weight << "\" color=\"" << edgeColor << "\"];\n";
+                    // if (weight * 5 >= maxOutWeight && weight > 1) {
+                    //     // Writing edges with weight as label
+                    //     file << "    \"" << nodeID << "\" -- \"" << neighborID << "\" [label=\"" << weight << "\" color=\"" << edgeColor << "\"];\n";
+                    // }
+                file << "    \"" << nodeID << "\" -- \"" << neighborID << "\" [label=\"" << weight << "\" color=\"" << edgeColor << "\"];\n";
                 }
-            }
+            // }
         }
     }
     file << "}\n";
@@ -487,13 +618,13 @@ void Graph::exportToCytoscapeJSON() {
 
             uint16_t nodeDist = distanceBetweenElements(orderedSNVs, nodePos, neighborPos);
             int visRange = maxHop * k;
-            if (nodeDist <= visRange) {
+            // if (nodeDist <= visRange) {
                 for (const auto& edgeEntry : edges) {
                     std::string edgeColor = edgeEntry.first;
                     int weight = edgeEntry.second;
 
                     int maxOutWeight = getMaxWeightedEdge(nodeID, edgeColor, "out");
-                    if (weight * 5 >= maxOutWeight && weight > 1) {
+                    // if (weight * 5 >= maxOutWeight && weight > 1) {
                         std::string edgeID = nodeID + "_" + neighborID;
 
                         edges_json.push_back({
@@ -505,9 +636,9 @@ void Graph::exportToCytoscapeJSON() {
                                 {"color", edgeColor}
                             }}
                         });
-                    }
+                    // }
                 }
-            }
+            // }
         }
     }
 
