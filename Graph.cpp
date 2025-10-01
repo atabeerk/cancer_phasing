@@ -2,6 +2,7 @@
 #include <fstream>
 #include <algorithm> 
 #include <cstdio>
+#include <random>
 
 #include "htslib/vcf.h"
 #include "htslib/sam.h"
@@ -49,7 +50,7 @@ void Graph::addSNV(const std::string& chrom,
 
     size_t n = pos.size();
     size_t num_combinations = 1 << n; // 2^n combinations
-
+    std::vector<std::string> newLayer;
     for (size_t i = 0; i < num_combinations; ++i) {
         std::vector<std::string> hap;
         for (size_t j = 0; j < n; ++j) {
@@ -62,14 +63,14 @@ void Graph::addSNV(const std::string& chrom,
         }
         // Label each combination with a haplotype ID like H0, H1, ...
         std::string hapID = "H" + std::to_string(i);
-        addNode(chrom, pos, hap, hapID);
+        addNode(newLayer, chrom, pos, hap, hapID);
     }
-
+    layers.push_back(newLayer);
     orderedSNVs.push_back(pos[0]);
 }
 
 
-void Graph::addNode(std::string chrom, std::vector<unsigned int> pos, std::vector<std::string> bases, std::string suffix) {
+void Graph::addNode(std::vector<std::string>& layer, std::string chrom, std::vector<unsigned int> pos, std::vector<std::string> bases, std::string suffix) {
     Node *n = new Node(k, chrom, pos, bases, suffix);
     nodes[n->ID()] = n;
 
@@ -77,6 +78,7 @@ void Graph::addNode(std::string chrom, std::vector<unsigned int> pos, std::vecto
     std::pair<std::map<std::string,std::map<std::string, int>>, std::map<std::string,std::map<std::string, int>>> emptyPair;
     adjList[n->ID()] = emptyPair;
     orderedNodes.push_back(n->ID());
+    layer.push_back(n->ID());
 
     nodeCount++;
     logHaplotypeMap(n->baseArr(), n->posArr(), n->ID());
@@ -96,6 +98,22 @@ std::vector<Node*> Graph::getSNVNodes(const std::string& chrom, const std::vecto
     }
 
     return nodes;
+}
+
+
+std::vector<Node*> Graph::getLayerNodes(int layerIndex) {
+    /*
+    Returns all nodes in the specified layer (0-indexed).
+    */
+    if (layerIndex < 0 || layerIndex >= layers.size()) {
+        throw std::out_of_range("Layer index out of range.");
+    }
+
+    std::vector<Node*> result;
+    for (const auto& nodeID : layers[layerIndex]) {
+        result.push_back(getNode(nodeID));
+    }
+    return result;
 }
 
 
@@ -287,7 +305,7 @@ void Graph::addEdge(std::string node1, std::string node2, int weight, std::strin
     }
 }
 
-void Graph::connectNodeGroupAll(const std::vector<Node *>& nodes, std::string edgeColor){
+void Graph::connectNodeGroupAll(const std::vector<Node *>& nodes, std::string edgeColor, std::string readName){
     /*
     Connects all nodes in the list
     */
@@ -296,9 +314,16 @@ void Graph::connectNodeGroupAll(const std::vector<Node *>& nodes, std::string ed
     }
 
     for (size_t i = 0; i < nodes.size(); i++) {
+        nodes[i]->addSupportingRead(readName);
+
+        // Check if readName exists in readSupports map
+        if (readSupports.find(readName) == readSupports.end()) {
+            readSupports[readName] = std::vector<std::string>();
+        }
+        readSupports[readName].push_back(nodes[i]->ID());
         for (size_t j = i + 1; j < nodes.size(); j++) {
-            addEdge(nodes[i]->ID(), nodes[j]->ID(), 1, edgeColor, "out");
-            addEdge(nodes[j]->ID(), nodes[i]->ID(), 1, edgeColor, "in");
+            addEdge(nodes[i]->ID(), nodes[j]->ID(), 1, edgeColor, "in");
+            addEdge(nodes[j]->ID(), nodes[i]->ID(), 1, edgeColor, "out");
         }
     }
 }
@@ -400,10 +425,10 @@ void Graph::printConnectivityStats() {
                 auto it = adjList.find(currID);
                 if (it == adjList.end()) continue;
 
-                const auto& inEdges = it->second.second; // use inedges now
+                const auto& outEdges = it->second.first; // use out edges now
 
                 // check each neighbor
-                for (const auto& neighborKV : inEdges) {
+                for (const auto& neighborKV : outEdges) {
                     const std::string& neighborID = neighborKV.first;
                     const auto& colorMap = neighborKV.second;
 
@@ -411,8 +436,8 @@ void Graph::printConnectivityStats() {
                     for (const auto& colorKV : colorMap) {
                         const std::string& edgeColor = colorKV.first;
                         int weight = colorKV.second;
-                        std::cout << "Checking in-edge: " << currID
-                                  << " <- " << neighborID
+                        std::cout << "Checking out-edge: " << currID
+                                  << " -> " << neighborID
                                   << " (color: " << edgeColor
                                   << ", weight: " << weight << ")" << std::endl;
                     }
@@ -463,6 +488,34 @@ void Graph::printConnectivityStats() {
     std::cout << "Connected region length: " << totalConnectedLength
               << " / Total region length: " << totalRegionLength
               << " (" << (100.0 * totalConnectedLength / totalRegionLength) << "%)" << std::endl;
+}
+
+
+uint Graph::getEdgeWeightBetweenNodes(const std::string& node1, const std::string& node2, const std::string& edgeColor) {
+    // if edgeColor is empty, return sum of all colors
+    if (edgeColor.empty()) {
+        uint totalWeight = 0;
+        for (const auto& neighbor : adjList.at(node1).first) {
+            const auto& edges = neighbor.second;
+            for (const auto& edge : edges) {
+                // if neighbor is node2, add its weight
+                if (neighbor.first == node2) {
+                    totalWeight += edge.second;
+                }
+            }
+        }
+        return totalWeight;
+    }
+
+    auto it = adjList.at(node1).first.find(node2);
+    if (it != adjList.at(node1).first.end()) {
+        const auto& edges = it->second;
+        auto colorIt = edges.find(edgeColor);
+        if (colorIt != edges.end()) {
+            return colorIt->second;
+        }
+    }
+    return 0; // Edge not found
 }
 
 
@@ -557,6 +610,7 @@ void Graph::exportToDot() {
     }
 }
 
+
 void Graph::exportToCytoscapeJSON() {
     std::string output_folder = Config::getInstance().getOutputDir();
     std::string json_file = output_folder + "/graph.json";
@@ -623,7 +677,7 @@ void Graph::exportToCytoscapeJSON() {
                     std::string edgeColor = edgeEntry.first;
                     int weight = edgeEntry.second;
 
-                    int maxOutWeight = getMaxWeightedEdge(nodeID, edgeColor, "out");
+                    // int maxOutWeight = getMaxWeightedEdge(nodeID, edgeColor, "out");
                     // if (weight * 5 >= maxOutWeight && weight > 1) {
                         std::string edgeID = nodeID + "_" + neighborID;
 
@@ -649,4 +703,78 @@ void Graph::exportToCytoscapeJSON() {
     file.close();
 
     std::cout << "Graph exported to Cytoscape JSON at " << json_file << std::endl;
+}
+
+
+uint Graph::longEdgeSupport(const std::vector<std::string>& path, const Node* candidate) {
+    /*
+    Given a path (list of node IDs) and a candidate node ID,
+    returns the number of long edges from any node in the path to the candidate node.
+    */
+    std::vector<std::string> candidateReads = candidate->getSupportingReads();
+    uint supportCount = 0;
+    for (const auto& read : candidateReads) {
+        std::vector<std::string> readNodes = readSupports[read];
+        for (const auto& nodeID : path) {
+            if (std::find(readNodes.begin(), readNodes.end(), nodeID) == readNodes.end()) {
+                break; // Count each read only once
+            }
+            supportCount++;
+        }
+    }
+    return supportCount;
+}
+
+
+std::string Graph::idxLayer2NodeID(uint layerIdx, uint nodeIdx) {
+    return layers[layerIdx][nodeIdx];
+}
+
+
+void Graph::simulatePath(std::vector<std::string>& path, std::vector<uint>& choices, uint layer) {
+    // 1. Check if there is are connections to the next layer, if not, stop
+    std::string currNodeID = path.back();
+    if (layer >= layers.size() - 1) {
+        return; // Reached the last layer
+    }
+    std::vector<Node*> candidates = getLayerNodes(layer + 1);
+    if (candidates.empty()) {
+        return;
+    }
+    // 2. Calculate long edges that support the current path to the nodes in the next layer
+    std::vector<std::pair<uint, uint>> edgeWeights; // map of candidate node ID to (short, long) edge weights
+    for (const auto& candidate : candidates) {
+        uint short_w = 0; //getEdgeWeightBetweenNodes(currNodeID, candidate->ID()); // get the adjacency list entry for the current node
+
+        const std::string& candidateID = candidate->ID();
+        uint long_w = longEdgeSupport(path, candidate) - short_w; // Since it includes edges from currNode as well
+        edgeWeights.push_back(std::make_pair(short_w, long_w));
+        // std::cout << "Candidate: " << candidateID 
+        //      << ", Short edge weight: " << short_w 
+        //      << ", Long edge weight: " << long_w << std::endl;
+    }
+
+    // 3. Convert edges to transition probabilities
+    std::vector<double> logits;
+    for (const auto& p : edgeWeights) {
+        // May want to weight short and long edges differently
+        double logit = p.first + p.second; 
+        logits.push_back(logit);
+    }
+    std::vector<double> transition_probs = softmax_with_temperature(logits, 10.0);
+
+    // 4. Select the node from the next layer based on the probabilities
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::discrete_distribution<> dist(transition_probs.begin(), transition_probs.end());
+    int idx = dist(gen);
+    
+    // 5. Add the new node to the path
+    std::string selectedNodeID = candidates[idx]->ID();
+    // std::cout << "Selected node: " << selectedNodeID << std::endl;
+    path.push_back(selectedNodeID);
+    choices.push_back(idx);
+    
+    // 6. Repeat until the end of the graph is reached
+    Graph::simulatePath(path, choices, layer+1);
 }

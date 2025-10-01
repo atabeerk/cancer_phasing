@@ -36,6 +36,14 @@ const std::string& Node::chrom() {
 }
 
 
+void Node::addSupportingRead(const std::string& readName) {
+    supporting_reads.push_back(readName);
+}
+
+const std::vector<std::string>& Node::getSupportingReads() const {
+    return supporting_reads;
+}
+
 void Node::print() {
     for (auto i : pos_arr){
         std::cout << i << " ";

@@ -4,6 +4,9 @@
 #include <iostream>
 #include <algorithm>
 #include <fstream>
+#include <cmath>
+#include <stdexcept>
+#include <limits>
 
 #include "util.hpp"
 #include "config.hpp"
@@ -93,3 +96,95 @@ void writeToFile(std::string filename, std::vector<std::string> content) {
         outFile.close();
     }
 }
+
+
+std::vector<double> softmax_with_temperature(const std::vector<double>& logits, double T) {
+    std::vector<double> expVals;
+    expVals.reserve(logits.size());
+
+    std::vector<double> logits_double(logits.begin(), logits.end());
+
+    double maxLogit = *max_element(logits_double.begin(), logits_double.end()); // for numerical stability
+    double sum = 0.0;
+
+    for (double z : logits_double) {
+        double e = std::exp((z - maxLogit) / T);
+        expVals.push_back(e);
+        sum += e;
+    }
+
+    for (double& val : expVals) {
+        val /= sum;
+    }
+
+    return expVals;
+}
+
+
+// Compute normalized Hamming distance between two integer vectors
+double hammingDistance(const std::vector<uint>& a, const std::vector<uint>& b) {
+    if (a.size() != b.size()) throw std::invalid_argument("Paths must have the same length");
+    size_t diff = 0;
+    for (size_t i = 0; i < a.size(); i++) if (a[i] != b[i]) diff++;
+    return static_cast<double>(diff) / a.size();
+}
+
+
+// Compute the average distance between two clusters
+double clusterDistance(const Cluster& c1, const Cluster& c2, const std::vector<std::vector<double>>& D) {
+    double sum = 0.0;
+    for (size_t i : c1.indices)
+        for (size_t j : c2.indices)
+            sum += D[i][j];
+    return sum / (c1.indices.size() * c2.indices.size());
+}
+
+
+// Hierarchical clustering with distance threshold
+std::vector<Cluster> hierarchicalClustering(const std::vector<std::vector<uint>>& paths, double threshold) {
+    size_t n = paths.size();
+    
+    // Initial clusters: one path per cluster
+    std::vector<Cluster> clusters(n);
+    for (size_t i = 0; i < n; i++) clusters[i].indices.push_back(i);
+
+    // Compute pairwise Hamming distances
+    std::vector<std::vector<double>> D(n, std::vector<double>(n, 0.0));
+    for (size_t i = 0; i < n; i++)
+        for (size_t j = i + 1; j < n; j++) {
+            D[i][j] = D[j][i] = hammingDistance(paths[i], paths[j]);
+        }
+
+    bool merged = true;
+    while (merged && clusters.size() > 1) {
+        merged = false;
+        size_t mergeA = 0, mergeB = 0;
+        double minDist = std::numeric_limits<double>::max();
+
+        // Find the closest pair of clusters
+        for (size_t i = 0; i < clusters.size(); i++) {
+            for (size_t j = i + 1; j < clusters.size(); j++) {
+                double dist = clusterDistance(clusters[i], clusters[j], D);
+                if (dist < minDist) {
+                    minDist = dist;
+                    mergeA = i;
+                    mergeB = j;
+                }
+            }
+        }
+
+        // Merge if below threshold
+        if (minDist <= threshold) {
+            clusters[mergeA].indices.insert(
+                clusters[mergeA].indices.end(),
+                clusters[mergeB].indices.begin(),
+                clusters[mergeB].indices.end()
+            );
+            clusters.erase(clusters.begin() + mergeB);
+            merged = true;
+        }
+    }
+
+    return clusters;
+}
+

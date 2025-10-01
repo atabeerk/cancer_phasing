@@ -67,7 +67,24 @@ int main(int argc, char* argv[]) {
 
     g.printConnectivityStats();
     g.exportToCytoscapeJSON();
-    g.exportToDot();
+    std::vector<std::string> simulatedPath = {g.getLayerNodes(0)[1]->ID()};
+    std::vector<std::vector<uint>> allChoices;
+    uint layer = 0;
+    for (uint i = 0; i < 100; i++){
+        std::vector<uint> choices = {0};
+        g.simulatePath(simulatedPath, choices, layer);
+        allChoices.push_back(choices);
+    }
+    double threshold = 0.05; // maximum fraction of differing steps allowed in same cluster
+    std::vector<Cluster> clusters = hierarchicalClustering(allChoices, threshold);
+
+    std::cout << "Total clusters: " << clusters.size() << std::endl;
+    std::cout << "Path length: " << clusters[0].indices.size() << std::endl;
+
+
+    std::cout << std::endl;
+
+    // g.exportToDot();
 
     return 0;
 }
