@@ -66,7 +66,7 @@ void vcfToBed(const std::string& vcfFile, const std::string& bedFile) {
 void generateGraphs(const std::string& outDir) {
     std::string chunkDir = fs::path(outDir) / "chunk_files";
     std::string graphDir = fs::path(outDir) / "graphs";
-    std::string cmd = "python3 generate_graphs.py " + chunkDir + " --outdir " + graphDir;
+    std::string cmd = "python generate_graphs.py " + chunkDir + " --outdir " + graphDir;
 
     std::cout << "\n=== Generating Cytoscape graphs ===\n";
     std::cout << "Running command: " << cmd << "\n";
