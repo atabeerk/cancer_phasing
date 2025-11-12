@@ -15,6 +15,12 @@ struct SNPEntry {
     int REF_REF = 0;
     int TOTAL = 0;
     bool valid = true;
+
+    // Store original (pre-threshold) counts
+    int orig_ALT_ALT = 0;
+    int orig_ALT_REF = 0;
+    int orig_REF_ALT = 0;
+    int orig_REF_REF = 0;
 };
 
 SNPEntry parseLine(const string& line) {
@@ -44,6 +50,12 @@ SNPEntry parseLine(const string& line) {
 }
 
 void applyThreshold(SNPEntry& e) {
+    // Store originals first
+    e.orig_ALT_ALT = e.ALT_ALT;
+    e.orig_ALT_REF = e.ALT_REF;
+    e.orig_REF_ALT = e.REF_ALT;
+    e.orig_REF_REF = e.REF_REF;
+
     double threshold = max((e.TOTAL * 0.12), 8.0);
     if (e.ALT_ALT < threshold) e.ALT_ALT = 0;
     if (e.ALT_REF < threshold) e.ALT_REF = 0;
@@ -76,25 +88,36 @@ void processFile(const string& filename) {
 
         applyThreshold(e);
 
+        // --- Create formatted output including ORIGINAL counts ---
+        string formatted =
+            e.chr + " " + to_string(e.pos1) + " " + to_string(e.pos2) + " "
+            "ALT_ALT=" + to_string(e.ALT_ALT) + " "
+            "ALT_REF=" + to_string(e.ALT_REF) + " "
+            "REF_ALT=" + to_string(e.REF_ALT) + " "
+            "REF_REF=" + to_string(e.REF_REF) + " "
+            "TOTAL=" + to_string(e.TOTAL) + " "
+            "ORIGINAL=" + to_string(e.orig_ALT_ALT) + "/" + to_string(e.orig_ALT_REF) + "/" +
+                          to_string(e.orig_REF_ALT) + "/" + to_string(e.orig_REF_REF);
+
         bool alt_alt = e.ALT_ALT > 0;
         bool alt_ref = e.ALT_REF > 0;
         bool ref_alt = e.REF_ALT > 0;
         bool ref_ref = e.REF_REF > 0;
 
         if (alt_alt && ref_ref && !alt_ref && !ref_alt)
-            f_co << line << '\n';                                // Co-occurring
+            f_co << formatted << '\n';                                // Co-occurring
         else if (!alt_alt && alt_ref && ref_alt)
-            f_div << line << '\n';                               // Divergent
+            f_div << formatted << '\n';                               // Divergent
         else if (alt_ref && alt_alt && ref_ref && !ref_alt)
-            f_snp1 << line << '\n';                              // SNP1 before SNP2
+            f_snp1 << formatted << '\n';                              // SNP1 before SNP2
         else if (ref_alt && alt_alt && ref_ref && !alt_ref)
-            f_snp2 << line << '\n';                              // SNP2 before SNP1
+            f_snp2 << formatted << '\n';                              // SNP2 before SNP1
         else if (alt_alt && alt_ref && !ref_alt && !ref_ref)
-            f_snp1_loss << line << '\n';                         // SNP1 before SNP2 (possible loss)
+            f_snp1_loss << formatted << '\n';                         // SNP1 before SNP2 (possible loss)
         else if (alt_alt && ref_alt && !alt_ref && !ref_ref)
-            f_snp2_loss << line << '\n';                         // SNP2 before SNP1 (possible loss)
+            f_snp2_loss << formatted << '\n';                         // SNP2 before SNP1 (possible loss)
         else
-            f_err << line << '\n';                               // Ambiguous
+            f_err << formatted << '\n';                               // Ambiguous
     }
 
     infile.close();
@@ -108,3 +131,4 @@ void processFile(const string& filename) {
 
     cout << "Processing complete.\n";
 }
+
