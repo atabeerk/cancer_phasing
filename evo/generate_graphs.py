@@ -1,38 +1,57 @@
 import os
 import json
+import argparse
 from pathlib import Path
 from collections import defaultdict
 
+import networkx as nx
+
 
 def read_edges_from_file(file_path, reverse=False):
-    """Reads (chrom, pos1, pos2) → returns node set and edge set (tuples of str)."""
+    """
+    Reads formatted lines like:
+      chr1 100 200 ALT_ALT=10 ALT_REF=5 REF_ALT=7 REF_REF=9 TOTAL=31 ORIGINAL=12/6/8/10
+    Returns:
+      nodes, edges
+    Each edge now includes extra metadata: original_counts and total.
+    """
     edges = set()
     nodes = set()
+    edge_data = {}  # key: (chrom, pos1, pos2), value: {"original": str, "total": int}
 
     with open(file_path) as f:
         for line in f:
             if not line.strip() or line.startswith("#"):
                 continue
-            parts = line.strip().split('\t')
-            if len(parts) < 3:
+
+            parts = line.strip().split()
+            if len(parts) < 4:
                 continue
 
             chrom, pos1, pos2 = parts[0], parts[1], parts[2]
             if reverse:
                 pos1, pos2 = pos2, pos1
+
+            # Extract fields
+            total = None
+            original = None
+            for token in parts[3:]:
+                if token.startswith("TOTAL="):
+                    total = int(token.split("=")[1])
+                elif token.startswith("ORIGINAL="):
+                    original = token.split("=")[1]
+
             edges.add((chrom, pos1, pos2))
             nodes.update([pos1, pos2])
+            edge_data[(chrom, pos1, pos2)] = {
+                "original": original,
+                "total": total
+            }
 
-    return nodes, edges
+    return nodes, edges, edge_data
 
 
 def build_graphs(chunk_dir):
-    """
-    For each chunk:
-      - Read *_before_* and *_loss_* files to create directed edges
-      - Read *_cooccurring.txt to create undirected edges (include all)
-      - Read *_divergent.txt to create divergent edges (red)
-    """
     chunk_dir = Path(chunk_dir)
     graphs = {}
 
@@ -65,53 +84,53 @@ def build_graphs(chunk_dir):
         cooccurring_edges = set()
         divergent_edges = set()
 
+        edge_meta = {}  # combined edge metadata for all types
+
         # Directed strong edges
         for key, reverse in [("forward", False), ("reverse", True)]:
             if key in files:
-                n, e = read_edges_from_file(files[key], reverse=reverse)
+                n, e, meta = read_edges_from_file(files[key], reverse=reverse)
                 nodes |= n
                 directed_edges |= {(chrom, s, t) for chrom, s, t in e}
+                edge_meta.update(meta)
 
         # Directed loss edges
         for key, reverse in [("forward_loss", False), ("reverse_loss", True)]:
             if key in files:
-                n, e = read_edges_from_file(files[key], reverse=reverse)
+                n, e, meta = read_edges_from_file(files[key], reverse=reverse)
                 nodes |= n
                 directed_loss_edges |= {(chrom, s, t) for chrom, s, t in e}
+                edge_meta.update(meta)
 
-        # Cooccurring edges (include all)
+        # Cooccurring edges
         if "cooccurring" in files:
-            n, e = read_edges_from_file(files["cooccurring"], reverse=False)
+            n, e, meta = read_edges_from_file(files["cooccurring"])
             nodes |= n
             cooccurring_edges |= e
+            edge_meta.update(meta)
 
-        # Divergent edges (only if both exist in directed nodes)
+        # Divergent edges
         if "divergent" in files:
-            n, e = read_edges_from_file(files["divergent"], reverse=False)
+            n, e, meta = read_edges_from_file(files["divergent"])
             for chrom, s, t in e:
                 if s in nodes and t in nodes:
                     divergent_edges.add((chrom, s, t))
+                    edge_meta[(chrom, s, t)] = meta.get((chrom, s, t), {})
 
         graphs[base] = {
             "nodes": nodes,
             "directed": directed_edges,
             "directed_loss": directed_loss_edges,
             "cooccurring": cooccurring_edges,
-            "divergent": divergent_edges
+            "divergent": divergent_edges,
+            "edge_meta": edge_meta
         }
 
     return graphs
 
 
-import networkx as nx
-
-
-import networkx as nx
-
 def compute_component_statistics(nodes, directed_edges, directed_loss_edges,
                                  cooccurring_edges, divergent_edges):
-    """Compute per-component statistics: region span and estimated haplotypes."""
-    # Build full undirected graph (for component detection)
     G_all = nx.Graph()
     G_all.add_nodes_from(nodes)
     G_all.add_edges_from([(s, t) for _, s, t in directed_edges])
@@ -124,26 +143,20 @@ def compute_component_statistics(nodes, directed_edges, directed_loss_edges,
 
     for comp_id, comp_nodes in enumerate(nx.connected_components(G_all)):
         comp_nodes = list(comp_nodes)
-
-        # --- Compute genomic span ---
         positions = sorted(int(n) for n in comp_nodes if n.isdigit())
         span = max(positions) - min(positions) if positions else 0
 
-        # --- Build cooccurrence-based subgraph ---
         G_co = nx.Graph()
         for chrom, s, t in cooccurring_edges:
             if s in comp_nodes and t in comp_nodes:
                 G_co.add_edge(s, t)
 
-        # --- Add singleton nodes (no cooccurrence edges) ---
         for n in comp_nodes:
             if n not in G_co:
                 G_co.add_node(n)
 
-        # --- Haplotype count = connected components in cooccurrence subgraph ---
         haplotypes = nx.number_connected_components(G_co)
 
-        # --- Record component mapping and stats ---
         for n in comp_nodes:
             node_to_component[n] = comp_id
 
@@ -159,14 +172,11 @@ def compute_component_statistics(nodes, directed_edges, directed_loss_edges,
 
 def write_cytoscape_json(nodes, directed_edges, directed_loss_edges,
                          cooccurring_edges, divergent_edges, component_stats,
-                         node_to_component, out_file):
-    """Write combined graph with component metadata as Cytoscape-compatible JSON."""
-    elements = {
-        "nodes": [],
-        "edges": []
-    }
+                         node_to_component, edge_meta, out_file):
+    """Write combined graph with TOTAL and ORIGINAL counts per edge."""
+    elements = {"nodes": [], "edges": []}
 
-    # Include node component metadata
+    # Nodes
     for n in sorted(nodes):
         elements["nodes"].append({
             "data": {
@@ -176,51 +186,28 @@ def write_cytoscape_json(nodes, directed_edges, directed_loss_edges,
             }
         })
 
-    # Directed edges
-    for chrom, s, t in directed_edges:
-        elements["edges"].append({
-            "data": {
-                "source": s, "target": t,
-                "chrom": chrom,
-                "directed": True,
-                "edge_type": "directed"
-            }
-        })
+    # Helper to add edges with metadata
+    def add_edges(edge_list, edge_type, directed_flag):
+        for chrom, s, t in edge_list:
+            meta = edge_meta.get((chrom, s, t), {})
+            elements["edges"].append({
+                "data": {
+                    "source": s,
+                    "target": t,
+                    "chrom": chrom,
+                    "directed": directed_flag,
+                    "edge_type": edge_type,
+                    "total": meta.get("total"),
+                    "original": meta.get("original")
+                }
+            })
 
-    # Directed loss
-    for chrom, s, t in directed_loss_edges:
-        elements["edges"].append({
-            "data": {
-                "source": s, "target": t,
-                "chrom": chrom,
-                "directed": True,
-                "edge_type": "directed_loss"
-            }
-        })
+    # Add all edge types
+    add_edges(directed_edges, "directed", True)
+    add_edges(directed_loss_edges, "directed_loss", True)
+    add_edges(cooccurring_edges, "cooccurring", False)
+    add_edges(divergent_edges, "divergent", False)
 
-    # Cooccurring
-    for chrom, s, t in cooccurring_edges:
-        elements["edges"].append({
-            "data": {
-                "source": s, "target": t,
-                "chrom": chrom,
-                "directed": False,
-                "edge_type": "cooccurring"
-            }
-        })
-
-    # Divergent
-    for chrom, s, t in divergent_edges:
-        elements["edges"].append({
-            "data": {
-                "source": s, "target": t,
-                "chrom": chrom,
-                "directed": False,
-                "edge_type": "divergent"
-            }
-        })
-
-    # Write everything (including stats)
     with open(out_file, "w") as out:
         json.dump({
             "elements": elements,
@@ -229,19 +216,10 @@ def write_cytoscape_json(nodes, directed_edges, directed_loss_edges,
 
 
 def write_component_statistics(out_dir, base, component_stats):
-    """
-    Append per-component statistics to 'component_statistics.txt' located
-    alongside the output directory.
-
-    Columns:
-        base, component_id, num_nodes, span_bp, haplotypes, nodes
-    """
-    # Get the parent directory of the output directory
     parent_dir = Path(out_dir).parent
     stats_path = parent_dir / "component_statistics.txt"
 
     write_header = not stats_path.exists()
-
     with open(stats_path, "a") as stats_out:
         if write_header:
             stats_out.write(
@@ -265,37 +243,27 @@ def main(chunk_dir, out_dir):
         directed_loss = g["directed_loss"]
         cooccurring = g["cooccurring"]
         divergent = g["divergent"]
+        edge_meta = g["edge_meta"]
 
-        # Compute per-component stats and node-component mapping
         component_stats, node_to_component = compute_component_statistics(
             nodes, directed, directed_loss, cooccurring, divergent
         )
 
-        # Write Cytoscape JSON
         out_file = Path(out_dir) / f"{base}.json"
         write_cytoscape_json(
-            nodes,
-            directed,
-            directed_loss,
-            cooccurring,
-            divergent,
-            component_stats,
-            node_to_component,
-            out_file
+            nodes, directed, directed_loss, cooccurring, divergent,
+            component_stats, node_to_component, edge_meta, out_file
         )
 
-        # New modularized call
         write_component_statistics(out_dir, base, component_stats)
-
         print(f"{out_file}: {len(nodes)} nodes, {len(component_stats)} components")
 
     print(f"Component statistics written to {Path(out_dir) / 'component_statistics.txt'}")
 
 
 if __name__ == "__main__":
-    import argparse
     parser = argparse.ArgumentParser(
-        description="Generate Cytoscape JSON DAGs including *loss* and *divergent* edges."
+        description="Generate Cytoscape JSON DAGs including TOTAL and ORIGINAL edge data."
     )
     parser.add_argument("chunk_dir", help="Directory containing chunk *_before_* and related files")
     parser.add_argument("--outdir", default="cytoscape_chunks", help="Output directory for JSON files")
