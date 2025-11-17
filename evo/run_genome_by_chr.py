@@ -2,6 +2,10 @@
 import os
 import sys
 import subprocess
+from pathlib import Path
+
+import pandas as pd
+
 
 def run_cmd(cmd):
     """Run a shell command and stream its output."""
@@ -36,6 +40,68 @@ def get_chromosomes_from_bam(bam_path):
         chromosomes.append((chrom, length))
 
     return chromosomes
+
+
+
+def write_global_summary(outdir):
+    """
+    Aggregate all component_statistics.txt files (one per chromosome)
+    into a global summary per chromosome.
+    """
+    outdir = Path(outdir)
+    summary_path = outdir / "global_summary.tsv"
+
+    rows = []
+
+    for chrom_dir in sorted(outdir.iterdir()):
+        if not chrom_dir.is_dir():
+            continue
+
+        stats_file = chrom_dir / "component_statistics.txt"
+        if not stats_file.exists():
+            continue
+
+        chrom = chrom_dir.name
+
+        # Load stats for this chromosome
+        df = pd.read_csv(
+            stats_file,
+            sep="\t"
+        )
+
+        if df.empty:
+            continue
+
+        # Compute metrics
+        avg_span = df["span_bp"].mean()
+        top10_span = df["span_bp"].nlargest(10).mean()
+
+        avg_hap = df["haplotypes"].mean()
+        top10_hap = df["haplotypes"].nlargest(10).mean()
+
+        df["num_nodes"] = df["nodes"].apply(lambda x: len(str(x).split(",")))
+        avg_nodes = df["num_nodes"].mean()
+        top10_nodes = df["num_nodes"].nlargest(10).mean()
+
+        num_components = len(df)
+
+        rows.append({
+            "chromosome": chrom,
+            "avg_span_bp": round(avg_span, 1),
+            "top10_max_span_bp": round(top10_span, 1),
+            "avg_haplotypes": round(avg_hap, 1),
+            "top10_max_haplotypes": round(top10_hap, 1),
+            "avg_num_nodes": round(avg_nodes, 1),
+            "top10_max_num_nodes": round(top10_nodes, 1),
+            "num_components": num_components
+        })
+
+    # Write summary
+    df_out = pd.DataFrame(rows)
+    df_out.to_csv(summary_path, sep="\t", index=False)
+
+    print(f"\nGlobal summary written to {summary_path}")
+
 
 
 def main():
@@ -99,6 +165,7 @@ def main():
 
         print(f"=== Done {chrom} ===")
 
+    write_global_summary(outdir)
     print(f"\nAll chromosomes processed for {genome_name}. Results saved in {outdir}")
 
 if __name__ == "__main__":
