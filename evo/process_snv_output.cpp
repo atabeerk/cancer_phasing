@@ -56,7 +56,7 @@ void applyThreshold(SNPEntry& e) {
     e.orig_REF_ALT = e.REF_ALT;
     e.orig_REF_REF = e.REF_REF;
 
-    double threshold = max((e.TOTAL * 0.12), 8.0);
+    double threshold = max((e.TOTAL * 0.12), 2.0);
     if (e.ALT_ALT < threshold) e.ALT_ALT = 0;
     if (e.ALT_REF < threshold) e.ALT_REF = 0;
     if (e.REF_ALT < threshold) e.REF_ALT = 0;
