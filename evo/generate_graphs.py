@@ -165,15 +165,23 @@ def write_cytoscape_json(nodes, directed_edges, directed_loss_edges,
 
 
 def write_component_statistics(out_dir, base, component_stats):
-    stats_path = Path(out_dir) / "component_statistics.txt"
+    out_dir = Path(out_dir)
+    stats_path = out_dir.parent.resolve() / "component_statistics.txt"
+
     write_header = not stats_path.exists()
-    with open(stats_path, "a") as f:
+
+    with open(stats_path, "a") as stats_out:
         if write_header:
-            f.write("base\tcomponent_id\tnum_nodes\tspan_bp\thaplotypes\tnodes\n")
+            stats_out.write(
+                "base\tcomponent_id\tnum_nodes\tspan_bp\thaplotypes\tnodes\n"
+            )
+
         for comp in component_stats:
-            nodes_str = ",".join(sorted(comp["nodes"]))
-            f.write(f"{base}\t{comp['component_id']}\t{len(comp['nodes'])}\t"
-                    f"{comp['span_bp']}\t{comp['haplotypes']}\t{nodes_str}\n")
+            node_list = ",".join(sorted(comp["nodes"]))
+            stats_out.write(
+                f"{base}\t{comp['component_id']}\t{len(comp['nodes'])}\t"
+                f"{comp['span_bp']}\t{comp['haplotypes']}\t{node_list}\n"
+            )
 
 
 def condense_graph(nodes, directed_edges, directed_loss_edges,
