@@ -15,42 +15,76 @@ def summarize_component_stats(stats_file):
     if df.empty:
         print(f"Warning: {stats_file} is empty — skipping.")
         return {
-            "avg_span_bp": 0,
+            "avg_span_bp": "0.0",
+            "median_span_bp": "0.0",
             "top10_max_span_bp": "",
-            "avg_haplotypes": 0,
+            "avg_haplotypes": "0.0",
+            "median_haplotypes": "0.0",
             "top10_max_haplotypes": "",
-            "avg_num_nodes": 0,
+            "avg_num_nodes": "0.0",
             "top10_max_num_nodes": "",
+            "median_multi_node_haplotypes": "0.0",
+            "top10_max_multi_node_haplotypes": "",
             "num_components": 0,
         }
 
     # Convert numeric columns safely
-    for col in ["span_bp", "haplotypes", "num_nodes"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    numeric_cols = ["span_bp", "haplotypes", "num_nodes", "multi_node_haplotypes"]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Drop rows where all numeric values are NaN
+    # Drop rows where the key numeric values are missing
     df = df.dropna(subset=["span_bp", "haplotypes", "num_nodes"])
     if df.empty:
         print(f"Warning: {stats_file} has no valid numeric rows — skipping.")
         return {
-            "avg_span_bp": 0,
+            "avg_span_bp": "0.0",
+            "median_span_bp": "0.0",
             "top10_max_span_bp": "",
-            "avg_haplotypes": 0,
+            "avg_haplotypes": "0.0",
+            "median_haplotypes": "0.0",
             "top10_max_haplotypes": "",
-            "avg_num_nodes": 0,
+            "avg_num_nodes": "0.0",
             "top10_max_num_nodes": "",
+            "median_multi_node_haplotypes": "0.0",
+            "top10_max_multi_node_haplotypes": "",
             "num_components": 0,
         }
 
-    return {
+    # Ensure multi_node_haplotypes exists and has no NaN
+    if "multi_node_haplotypes" not in df.columns:
+        df["multi_node_haplotypes"] = 0
+    df["multi_node_haplotypes"] = df["multi_node_haplotypes"].fillna(0)
+
+    # --- Compute statistics ---
+    stats = {
         "avg_span_bp": df["span_bp"].mean(),
+        "median_span_bp": df["span_bp"].median(),
         "top10_max_span_bp": ",".join(map(str, df["span_bp"].nlargest(10).tolist())),
+
         "avg_haplotypes": df["haplotypes"].mean(),
+        "median_haplotypes": df["haplotypes"].median(),
         "top10_max_haplotypes": ",".join(map(str, df["haplotypes"].nlargest(10).tolist())),
+
         "avg_num_nodes": df["num_nodes"].mean(),
         "top10_max_num_nodes": ",".join(map(str, df["num_nodes"].nlargest(10).tolist())),
+
+        "median_multi_node_haplotypes": df["multi_node_haplotypes"].median(),
+        "top10_max_multi_node_haplotypes": ",".join(
+            map(str, df["multi_node_haplotypes"].nlargest(10).tolist())
+        ),
+
         "num_components": len(df),
     }
+
+    # --- Format all float values to one decimal place ---
+    for key, val in stats.items():
+        if isinstance(val, (float, int)) and key != "num_components":
+            stats[key] = f"{val:.1f}"
+
+    return stats
+
 
 
 
