@@ -77,6 +77,7 @@ void processFile(const string& filename) {
     ofstream f_snp2(base + "_snp2_before_snp1.txt");
     ofstream f_snp1_loss(base + "_snp1_before_snp2_loss.txt");
     ofstream f_snp2_loss(base + "_snp2_before_snp1_loss.txt");
+    ofstream f_co_loss(base + "_cooccurring_loss.txt");
     ofstream f_err(base + "_errors.txt");
 
     string line;
@@ -116,6 +117,8 @@ void processFile(const string& filename) {
             f_snp1_loss << formatted << '\n';                         // SNP1 before SNP2 (possible loss)
         else if (alt_alt && ref_alt && !alt_ref && !ref_ref)
             f_snp2_loss << formatted << '\n';                         // SNP2 before SNP1 (possible loss)
+        else if (alt_alt && !alt_ref && !ref_alt && !ref_ref)
+            f_co_loss << formatted << '\n';                           // Co-occurring with loss
         else
             f_err << formatted << '\n';                               // Ambiguous
     }

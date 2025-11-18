@@ -36,6 +36,21 @@ def read_edges_from_file(file_path, reverse=False):
     return nodes, edges, edge_data
 
 
+def parse_pileup_depth(pileup_file):
+    """
+    Returns a dict: chrom:pos -> depth
+    """
+    depth_dict = {}
+    with open(pileup_file) as f:
+        for line in f:
+            if not line.strip(): continue
+            parts = line.strip().split()
+            pos = int(parts[1])
+            depth = int(parts[3])
+            depth_dict[str(pos)] = depth
+    return depth_dict
+
+
 def build_graphs(chunk_dir):
     """Group files by chunk and type; build nodes, edges, and metadata."""
     chunk_dir = Path(chunk_dir)
@@ -52,6 +67,8 @@ def build_graphs(chunk_dir):
             grouped[name.replace("_snp1_before_snp2", "")]["forward"] = f
         elif "_snp2_before_snp1" in name:
             grouped[name.replace("_snp2_before_snp1", "")]["reverse"] = f
+        elif "_cooccurring_loss" in name:
+            grouped[name.replace("_cooccurring_loss", "")]["cooccurring_loss"] = f
         elif "_cooccurring" in name:
             grouped[name.replace("_cooccurring", "")]["cooccurring"] = f
         elif "_divergent" in name:
@@ -59,7 +76,7 @@ def build_graphs(chunk_dir):
 
     for base, files in grouped.items():
         nodes, directed_edges, directed_loss_edges = set(), set(), set()
-        cooccurring_edges, divergent_edges = set(), set()
+        cooccurring_edges, cooccurring_loss_edges, divergent_edges = set(), set(), set()
         edge_meta = {}
 
         # Directed edges
@@ -69,6 +86,7 @@ def build_graphs(chunk_dir):
                 nodes |= n
                 directed_edges |= e
                 edge_meta.update(meta)
+
         # Directed loss
         for key, rev in [("forward_loss", False), ("reverse_loss", True)]:
             if key in files:
@@ -76,12 +94,21 @@ def build_graphs(chunk_dir):
                 nodes |= n
                 directed_loss_edges |= e
                 edge_meta.update(meta)
+
         # Cooccurring
         if "cooccurring" in files:
             n, e, meta = read_edges_from_file(files["cooccurring"])
             nodes |= n
             cooccurring_edges |= e
             edge_meta.update(meta)
+
+        # Cooccurring loss
+        if "cooccurring_loss" in files:
+            n, e, meta = read_edges_from_file(files["cooccurring_loss"])
+            nodes |= n
+            cooccurring_loss_edges |= e
+            edge_meta.update(meta)
+
         # Divergent (only if both nodes exist)
         if "divergent" in files:
             n, e, meta = read_edges_from_file(files["divergent"])
@@ -95,6 +122,7 @@ def build_graphs(chunk_dir):
             "directed": directed_edges,
             "directed_loss": directed_loss_edges,
             "cooccurring": cooccurring_edges,
+            "cooccurring_loss": cooccurring_loss_edges,
             "divergent": divergent_edges,
             "edge_meta": edge_meta
         }
@@ -102,12 +130,13 @@ def build_graphs(chunk_dir):
 
 
 def compute_component_statistics(nodes, directed_edges, directed_loss_edges,
-                                 cooccurring_edges, divergent_edges):
+                                 cooccurring_edges, cooccurring_loss_edges, divergent_edges):
     G_all = nx.Graph()
     G_all.add_nodes_from(nodes)
     G_all.add_edges_from([(s, t) for _, s, t in directed_edges])
     G_all.add_edges_from([(s, t) for _, s, t in directed_loss_edges])
     G_all.add_edges_from([(s, t) for _, s, t in cooccurring_edges])
+    G_all.add_edges_from([(s, t) for _, s, t in cooccurring_loss_edges])
     G_all.add_edges_from([(s, t) for _, s, t in divergent_edges])
 
     component_stats, node_to_component = [], {}
@@ -116,32 +145,54 @@ def compute_component_statistics(nodes, directed_edges, directed_loss_edges,
         positions = sorted(int(n) for n in comp_nodes if n.isdigit())
         span = max(positions) - min(positions) if positions else 0
         G_co = nx.Graph()
-        for chrom, s, t in cooccurring_edges:
+
+        for _, s, t in cooccurring_edges | cooccurring_loss_edges:
             if s in comp_nodes and t in comp_nodes:
                 G_co.add_edge(s, t)
+
+        # Count multi-node haplotypes
+        multi_node_haplotypes = nx.number_connected_components(G_co)
+
         for n in comp_nodes:
             if n not in G_co:
                 G_co.add_node(n)
+
         haplotypes = nx.number_connected_components(G_co)
+
         for n in comp_nodes:
             node_to_component[n] = comp_id
+
         component_stats.append({
             "component_id": comp_id,
             "nodes": comp_nodes,
             "span_bp": span,
-            "haplotypes": haplotypes
+            "haplotypes": haplotypes, # includes singletons as well
+            "multi_node_haplotypes": multi_node_haplotypes # only multi-node clusters
         })
     return component_stats, node_to_component
 
 
 def write_cytoscape_json(nodes, directed_edges, directed_loss_edges,
-                         cooccurring_edges, divergent_edges,
-                         component_stats, node_to_component,
-                         edge_meta, out_file):
+                         cooccurring_edges, cooccurring_loss_edges, 
+                         divergent_edges, component_stats, node_to_component,
+                         edge_meta, out_file, pileup_depths):
     elements = {"nodes": [], "edges": []}
+
     for n in sorted(nodes):
-        elements["nodes"].append({"data": {"id": n, "label": n,
-                                           "component_id": node_to_component.get(n, -1)}})
+        # Depth lookup by position only
+        depth = 0
+        if pileup_depths:
+            depth = pileup_depths.get(n, 0)
+
+        elements["nodes"].append({
+            "data": {
+                "id": n,
+                "label": n,
+                "component_id": node_to_component.get(n, -1),
+                "depth": depth   # per-SNP coverage
+            }
+        })
+
     def add_edges(edges, edge_type, directed_flag):
         for chrom, s, t in edges:
             meta = edge_meta.get((chrom, s, t), {})
@@ -156,10 +207,13 @@ def write_cytoscape_json(nodes, directed_edges, directed_loss_edges,
                     "original": meta.get("original")
                 }
             })
+
     add_edges(directed_edges, "directed", True)
     add_edges(directed_loss_edges, "directed_loss", True)
     add_edges(cooccurring_edges, "cooccurring", False)
+    add_edges(cooccurring_loss_edges, "cooccurring_loss", False)
     add_edges(divergent_edges, "divergent", False)
+
     with open(out_file, "w") as out:
         json.dump({"elements": elements, "component_stats": component_stats}, out, indent=2)
 
@@ -173,23 +227,25 @@ def write_component_statistics(out_dir, base, component_stats):
     with open(stats_path, "a") as stats_out:
         if write_header:
             stats_out.write(
-                "base\tcomponent_id\tnum_nodes\tspan_bp\thaplotypes\tnodes\n"
+                "base\tcomponent_id\tnum_nodes\tspan_bp\thaplotypes\tmulti_node_haplotypes\tnodes\n"
             )
 
         for comp in component_stats:
             node_list = ",".join(sorted(comp["nodes"]))
             stats_out.write(
                 f"{base}\t{comp['component_id']}\t{len(comp['nodes'])}\t"
-                f"{comp['span_bp']}\t{comp['haplotypes']}\t{node_list}\n"
+                f"{comp['span_bp']}\t{comp['haplotypes']}\t{comp['multi_node_haplotypes']}\t"
+                f"{','.join(sorted(comp['nodes']))}\n"
             )
 
 
 def condense_graph(nodes, directed_edges, directed_loss_edges,
-                   cooccurring_edges, divergent_edges):
+                   cooccurring_edges, cooccurring_loss_edges, divergent_edges):
     """Collapse cooccurrence clusters into CNs and aggregate edges between them."""
     G_co = nx.Graph()
     G_co.add_nodes_from(nodes)
     G_co.add_edges_from([(s, t) for _, s, t in cooccurring_edges])
+    G_co.add_edges_from([(s, t) for _, s, t in cooccurring_loss_edges])
 
     cn_list, node_to_cn = [], {}
     for cn_id, cluster in enumerate(nx.connected_components(G_co)):
@@ -233,47 +289,58 @@ def condense_graph(nodes, directed_edges, directed_loss_edges,
 
 def write_condensed_json_and_tsv(cn_nodes, cn_edges, cn_flags, out_base):
     elements = {"nodes": [], "edges": []}
+
     for cn_id, members in cn_nodes.items():
         elements["nodes"].append({
             "data": {"id": cn_id, "label": cn_id,
                      "size": len(members), "mixed_edges": cn_flags.get(cn_id, False)}
         })
+
     for src, tgt, edge_type in cn_edges:
         elements["edges"].append({
             "data": {"source": src, "target": tgt, "edge_type": edge_type,
                      "directed": edge_type in ("directed", "directed_loss")}
         })
+
     with open(f"{out_base}_condensed.json", "w") as jf:
         json.dump({"elements": elements}, jf, indent=2)
 
     with open(f"{out_base}_condensed.stats.tsv", "w", newline="") as tf:
         writer = csv.writer(tf, delimiter="\t")
         writer.writerow(["CN_id", "num_nodes", "span_bp", "nodes_list", "mixed_edges"])
+
         for cn_id, members in cn_nodes.items():
             positions = sorted(int(n) for n in members if n.isdigit())
             span = max(positions) - min(positions) if positions else 0
             writer.writerow([cn_id, len(members), span, ",".join(sorted(members)), cn_flags.get(cn_id, False)])
+
     print(f"Condensed JSON/TSV written: {out_base}_condensed.*")
 
 
 def process_graph(base, g, out_dir):
     nodes, directed, directed_loss = g["nodes"], g["directed"], g["directed_loss"]
-    cooccurring, divergent, edge_meta = g["cooccurring"], g["divergent"], g["edge_meta"]
+    cooccurring, cooccurring_loss, divergent = g["cooccurring"], g["cooccurring_loss"], g["divergent"]
+    edge_meta = g["edge_meta"]
 
     # --- Step 1: Compute component stats and write uncondensed JSON ---
     component_stats, node_to_component = compute_component_statistics(
-        nodes, directed, directed_loss, cooccurring, divergent
+        nodes, directed, directed_loss, cooccurring, cooccurring_loss, divergent
     )
+    chrom, start = base.split("_")[1:3]  # ['chr7', '118095503']
+    pileup_file = Path(out_dir).parent / "pileup_files" / f"mpileup_{chrom}_{start}.out"
+    pileup_depths = parse_pileup_depth(pileup_file)
+
     out_file = Path(out_dir) / f"{base}.json"
     write_cytoscape_json(
-        nodes, directed, directed_loss, cooccurring, divergent,
-        component_stats, node_to_component, edge_meta, out_file
+        nodes, directed, directed_loss, cooccurring, cooccurring_loss,
+        divergent, component_stats, node_to_component, edge_meta, out_file,
+        pileup_depths
     )
     write_component_statistics(out_dir, base, component_stats)
     print(f"{out_file}: {len(nodes)} nodes, {len(component_stats)} components")
 
     # --- Step 2: Condense CN graph ---
-    cn_list, cn_edges_dict = condense_graph(nodes, directed, directed_loss, cooccurring, divergent)
+    cn_list, cn_edges_dict = condense_graph(nodes, directed, directed_loss, cooccurring, cooccurring_loss, divergent)
     cn_flags = {c["id"]: c["mixed_edges"] for c in cn_list}
     cn_nodes = {c["id"]: set(c["members"]) for c in cn_list}
 
