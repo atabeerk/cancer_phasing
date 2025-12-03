@@ -66,7 +66,7 @@ void vcfToBed(const std::string& vcfFile, const std::string& bedFile) {
 void generateGraphs(const std::string& outDir) {
     std::string chunkDir = fs::path(outDir) / "chunk_files";
     std::string graphDir = fs::path(outDir) / "graphs";
-    std::string cmd = "python generate_graphs.py " + chunkDir + " --outdir " + graphDir;
+    std::string cmd = "python graph_ops/main.py " + chunkDir + " --outdir " + graphDir;
 
     std::cout << "\n=== Generating Cytoscape graphs ===\n";
     std::cout << "Running command: " << cmd << "\n";
@@ -82,13 +82,18 @@ void generateGraphs(const std::string& outDir) {
 
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " <VCF_FILE> <BAM_FILE> <OUTPUT_DIR>\n";
+        std::cerr << "Usage: " << argv[0]
+                  << " <VCF_FILE> <BAM_FILE> <OUTPUT_DIR> [MIN_READ_SUPPORT=4]\n";
         return 1;
     }
 
     std::string vcfFile = argv[1];
     std::string bamFile = argv[2];
     std::string outDir = argv[3];
+
+    int minReadSupport = 4;
+    if (argc >= 5)
+        minReadSupport = std::stoi(argv[4]);
 
     // Main output directory
     if (!fs::exists(outDir)) {
@@ -170,9 +175,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-
-            // --- Process chunk output ---
-            processFile(chunk_out_file.string());
+            processFile(chunk_out_file.string(), minReadSupport);
         }
     }
 

@@ -5,4 +5,4 @@
 #include <vector>
 #include <filesystem>
 
-void processFile(const std::string& filename);
+void processFile(const std::string& filename, int minReadSupport);

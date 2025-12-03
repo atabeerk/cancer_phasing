@@ -49,21 +49,21 @@ SNPEntry parseLine(const string& line) {
     return e;
 }
 
-void applyThreshold(SNPEntry& e) {
+void applyThreshold(SNPEntry& e, int minReadSupport) {
     // Store originals first
     e.orig_ALT_ALT = e.ALT_ALT;
     e.orig_ALT_REF = e.ALT_REF;
     e.orig_REF_ALT = e.REF_ALT;
     e.orig_REF_REF = e.REF_REF;
 
-    double threshold = max((e.TOTAL * 0.12), 2.0);
+    double threshold = max((e.TOTAL * 0.12), static_cast<double>(minReadSupport));
     if (e.ALT_ALT < threshold) e.ALT_ALT = 0;
     if (e.ALT_REF < threshold) e.ALT_REF = 0;
     if (e.REF_ALT < threshold) e.REF_ALT = 0;
     if (e.REF_REF < threshold) e.REF_REF = 0;
 }
 
-void processFile(const string& filename) {
+void processFile(const string& filename, int minReadSupport) {
     ifstream infile(filename);
     if (!infile) {
         cerr << "Error: cannot open input file.\n";
@@ -87,7 +87,7 @@ void processFile(const string& filename) {
         SNPEntry e = parseLine(line);
         if (!e.valid) continue;  // skip TOTAL <= 0
 
-        applyThreshold(e);
+        applyThreshold(e, minReadSupport);
 
         // --- Create formatted output including ORIGINAL counts ---
         string formatted =
