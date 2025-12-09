@@ -1,61 +1,175 @@
-from typing import Tuple, Dict, Set, List
 import networkx as nx
 from pathlib import Path
 import json
 import csv
+from typing import Set, Tuple, Dict, List
+
+Edge = Tuple[str, str, str]  # (chrom, source, target)
 
 
-Edge = Tuple[str, str, str]  # (chrom, src, dst)
-
-
-def condense_graph(nodes: Set[str],
-                   directed_edges: Set[Edge],
-                   directed_loss_edges: Set[Edge],
-                   cooccurring_edges: Set[Edge],
-                   cooccurring_loss_edges: Set[Edge],
-                   divergent_edges: Set[Edge]) -> Tuple[List[Dict], Dict[str, Set[Tuple[str, str, str]]]]:
-    """Collapse cooccurrence clusters into CNs and aggregate edges between them.
-
-    Returns (cn_list, cn_edges_dict) where cn_edges_dict maps edge_type -> set of (chrom, src_cn, dst_cn).
+def conflict_free_clusters(
+        nodes: Set[str],
+        cooccurring_edges: Set[Edge],
+        cooccurring_loss_edges: Set[Edge],
+        directed_edges: Set[Edge],
+        directed_loss_edges: Set[Edge],
+        divergent_edges: Set[Edge]
+    ) -> List[Set[str]]:
     """
+    Build conflict-free clusters of nodes using cooccurrence as connectivity
+    and removing nodes that create directed/divergent conflicts.
+
+    IMPORTANT:
+    - When a node is removed from a cluster, the cluster may fracture.
+      Each fractured subcluster is re-evaluated independently.
+    - Removed nodes are NOT discarded; after processing all clusters they
+      are used to build new clusters (or singleton clusters).
+    """
+
+    # Build full cooccurrence graph
     G_co = nx.Graph()
     G_co.add_nodes_from(nodes)
     G_co.add_edges_from([(s, t) for _, s, t in cooccurring_edges])
     G_co.add_edges_from([(s, t) for _, s, t in cooccurring_loss_edges])
 
-    cn_list = []
-    node_to_cn: Dict[str, str] = {}
-    for cn_id, cluster in enumerate(nx.connected_components(G_co)):
-        cluster = list(cluster)
-        cn_name = f"CN{cn_id}"
-        span = None
-        if all(n.isdigit() for n in cluster):
-            positions = [int(n) for n in cluster]
-            span = max(positions) - min(positions) if positions else 0
+    # Precompute all conflict edges
+    conflict_edges = set()
+    for edge_set in (directed_edges, directed_loss_edges, divergent_edges):
+        for _, s, t in edge_set:
+            conflict_edges.add((s, t))
 
+    # Utility: compute internal conflicts in a cluster
+    def get_internal_conflicts(cluster: Set[str]):
+        return [(s, t) for (s, t) in conflict_edges if s in cluster and t in cluster]
+
+    # Utility: choose a node to remove
+    def choose_node_to_remove(cluster: Set[str], internal_conflicts: List[Tuple[str, str]]):
+        conflict_degree = {n: 0 for n in cluster}
+        coocc_degree = {n: 0 for n in cluster}
+
+        for s, t in internal_conflicts:
+            if s in conflict_degree: conflict_degree[s] += 1
+            if t in conflict_degree: conflict_degree[t] += 1
+
+        for _, s, t in cooccurring_edges | cooccurring_loss_edges:
+            if s in coocc_degree and t in coocc_degree:
+                coocc_degree[s] += 1
+                coocc_degree[t] += 1
+
+        # highest conflict degree
+        max_c = max(conflict_degree.values())
+        candidates = [n for n in cluster if conflict_degree[n] == max_c]
+
+        # tie-break: lowest cooccurrence degree
+        if len(candidates) > 1:
+            min_co = min(coocc_degree[n] for n in candidates)
+            candidates = [n for n in candidates if coocc_degree[n] == min_co]
+
+        # deterministic choice
+        return sorted(candidates)[0]
+
+    # Step 1: initial clusters = CCs of cooccurrence graph
+    initial_clusters = [set(c) for c in nx.connected_components(G_co)]
+    print(f"\n[INFO] Found {len(initial_clusters)} initial cooccurrence clusters")
+
+    queue = initial_clusters[:]  # clusters needing evaluation
+    final_clusters = []
+    removed_nodes = set()
+
+    # Step 2: process clusters until all are conflict-free
+    while queue:
+        cluster = queue.pop()
+        if len(cluster) <= 1:
+            final_clusters.append(cluster)
+            continue
+
+        internal_conflicts = get_internal_conflicts(cluster)
+
+        if not internal_conflicts:
+            # conflict-free cluster
+            final_clusters.append(cluster)
+            continue
+
+        print(f"  - Internal conflicts detected: {len(internal_conflicts)} edges")
+        for s, t in internal_conflicts:
+            print(f"     * Conflict edge: {s} -> {t}")
+
+        # remove one problematic node
+        node_to_remove = choose_node_to_remove(cluster, internal_conflicts)
+        print(f"  - Removing node: {node_to_remove}")
+        cluster.remove(node_to_remove)
+        removed_nodes.add(node_to_remove)
+
+        # cluster may fracture — recompute connected components
+        if cluster:
+            subclusters = [set(c) for c in nx.connected_components(G_co.subgraph(cluster))]
+            queue.extend(subclusters)
+
+    # Step 3: process removed nodes into new clusters
+    # Build cooccurrence graph restricted to removed nodes
+    G_removed = nx.Graph()
+    G_removed.add_nodes_from(removed_nodes)
+
+    for _, s, t in cooccurring_edges | cooccurring_loss_edges:
+        if s in removed_nodes and t in removed_nodes:
+            G_removed.add_edge(s, t)
+
+    # connected components among removed nodes
+    leftover_clusters = [set(c) for c in nx.connected_components(G_removed)]
+
+    # nodes not in any edges → singleton clusters
+    nodes_in_removed_edges = set().union(*leftover_clusters) if leftover_clusters else set()
+    singletons = removed_nodes - nodes_in_removed_edges
+    leftover_clusters.extend([{n} for n in singletons])
+
+    # add all leftover clusters to final result
+    final_clusters.extend(leftover_clusters)
+
+    return final_clusters
+
+
+
+def condense_graph(
+        nodes: Set[str],
+        directed_edges: Set[Edge],
+        directed_loss_edges: Set[Edge],
+        cooccurring_edges: Set[Edge],
+        cooccurring_loss_edges: Set[Edge],
+        divergent_edges: Set[Edge],
+    ) -> Tuple[List[Dict], Dict[str, Set[Tuple[str, str]]]]:
+    """
+    Collapse cooccurrence clusters into CNs using conflict-free clustering.
+    Returns:
+        - cn_list: list of CN dicts with members and span
+        - cn_edges: dict of CN-level edges by type
+    """
+    # Get conflict-free clusters
+    clusters = conflict_free_clusters(
+        nodes,
+        cooccurring_edges,
+        cooccurring_loss_edges,
+        directed_edges,
+        directed_loss_edges,
+        divergent_edges
+    )
+
+    cn_list, node_to_cn = [], {}
+    for cn_id, cluster in enumerate(clusters):
+        cn_name = f"CN{cn_id}"
         cn_list.append({
             "id": cn_name,
-            "members": cluster,
+            "members": list(cluster),
             "n_nodes": len(cluster),
-            "span": span,
+            "span": max(map(int, cluster)) - min(map(int, cluster)) if all(n.isdigit() for n in cluster) else None,
             "mixed_edges": False
         })
         for n in cluster:
             node_to_cn[n] = cn_name
 
-    # Flag CNs with internal directed/divergent edges
-    for edge_set in [directed_edges, directed_loss_edges, divergent_edges]:
-        for _, s, t in edge_set:
-            if s in node_to_cn and t in node_to_cn and node_to_cn[s] == node_to_cn[t]:
-                cn_name = node_to_cn[s]
-                for c in cn_list:
-                    if c["id"] == cn_name:
-                        c["mixed_edges"] = True
+    # Build CN-level edges (only between CNs)
+    cn_edges = {"directed": set(), "directed_loss": set(), "divergent": set()}
 
-    # Build CN-level edges
-    cn_edges: Dict[str, Set[Tuple[str, str, str]]] = {"directed": set(), "directed_loss": set(), "divergent": set()}
-
-    def add_cn_edge(edge_type: str, s: str, t: str, chrom: str):
+    def add_cn_edge(edge_type, s, t, chrom):
         src, dst = node_to_cn.get(s), node_to_cn.get(t)
         if not src or not dst or src == dst:
             return
@@ -74,13 +188,9 @@ def condense_graph(nodes: Set[str],
 def write_condensed_json_and_tsv(cn_nodes: Dict[str, Set[str]],
                                  cn_edges: List[Tuple[str, str, str]],
                                  cn_flags: Dict[str, bool],
-                                 out_base: Path) -> None:
-    """Write condensed JSON and TSV stats based on CN-level nodes and edges.
-
-    cn_nodes: mapping CN_id -> set(members)
-    cn_edges: list of tuples (src_cn, dst_cn, edge_type)
-    cn_flags: mapping CN_id -> mixed_edges boolean
-    out_base: Path-like (base path, e.g. Path(out_dir) / base)
+                                 out_base: Path):
+    """
+    Write condensed CN graph to JSON and TSV.
     """
     elements = {"nodes": [], "edges": []}
 
@@ -96,19 +206,15 @@ def write_condensed_json_and_tsv(cn_nodes: Dict[str, Set[str]],
                      "directed": edge_type in ("directed", "directed_loss")}
         })
 
-    json_path = f"{out_base}_condensed.json"
-    tsv_path = f"{out_base}_condensed.stats.tsv"
-
-    with open(json_path, "w") as jf:
+    with open(f"{out_base}_condensed.json", "w") as jf:
         json.dump({"elements": elements}, jf, indent=2)
 
-    with open(tsv_path, "w", newline="") as tf:
+    with open(f"{out_base}_condensed.stats.tsv", "w", newline="") as tf:
         writer = csv.writer(tf, delimiter="\t")
         writer.writerow(["CN_id", "num_nodes", "span_bp", "nodes_list", "mixed_edges"])
-
         for cn_id, members in cn_nodes.items():
             positions = sorted(int(n) for n in members if n.isdigit())
             span = max(positions) - min(positions) if positions else 0
             writer.writerow([cn_id, len(members), span, ",".join(sorted(members)), cn_flags.get(cn_id, False)])
 
-    print(f"Condensed JSON/TSV written: {json_path}, {tsv_path}")
+    print(f"Condensed JSON/TSV written: {out_base}_condensed.*")
