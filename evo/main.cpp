@@ -83,7 +83,7 @@ void generateGraphs(const std::string& outDir) {
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0]
-                  << " <VCF_FILE> <BAM_FILE> <OUTPUT_DIR> [MIN_READ_SUPPORT=4]\n";
+                  << " <VCF_FILE> <BAM_FILE> <OUTPUT_DIR> [MIN_READS=2]\n";
         return 1;
     }
 
@@ -91,9 +91,12 @@ int main(int argc, char* argv[]) {
     std::string bamFile = argv[2];
     std::string outDir = argv[3];
 
-    int minReadSupport = 4;
-    if (argc >= 5)
-        minReadSupport = std::stoi(argv[4]);
+    int minReads = 2;
+    if (argc >= 5) {
+        minReads = std::stoi(argv[4]);
+    }
+    
+    std::cout << "Using MIN_READS = " << minReads << "\n";
 
     // Main output directory
     if (!fs::exists(outDir)) {
@@ -175,7 +178,8 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            processFile(chunk_out_file.string(), minReadSupport);
+            
+            processFile(chunk_out_file.string(), minReads);
         }
     }
 
