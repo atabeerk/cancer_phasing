@@ -12,6 +12,7 @@ struct SNV {
     int pos;
     char ref;
     char alt;
+    float vaf;
 };
 
 struct PositionInfo {

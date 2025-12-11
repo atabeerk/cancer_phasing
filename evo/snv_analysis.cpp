@@ -32,7 +32,7 @@ std::vector<SNV> readVCF(const std::string& vcfFile) {
     }
 
     while (bcf_read(fp, hdr, rec) == 0) {
-        bcf_unpack(rec, BCF_UN_STR);
+        bcf_unpack(rec, BCF_UN_ALL);
 
         SNV s;
         s.chrom = bcf_hdr_id2name(hdr, rec->rid);
@@ -43,6 +43,29 @@ std::vector<SNV> readVCF(const std::string& vcfFile) {
         const char* alt = rec->d.allele[1];
         s.ref = ref[0];
         s.alt = alt[0];
+
+                float* af = NULL;
+        int naf = 0;
+        if (bcf_get_info_float(hdr, rec, "AF", &af, &naf) > 0 && naf > 0) {
+            s.vaf = af[0];
+            free(af);
+        } else {
+            // Try FORMAT/AD (allele depth) to calculate VAF
+            int32_t* ad = NULL;
+            int nad = 0;
+            if (bcf_get_format_int32(hdr, rec, "AD", &ad, &nad) > 0 && nad >= 2) {
+                int ref_depth = ad[0];
+                int alt_depth = ad[1];
+                int total_depth = ref_depth + alt_depth;
+                s.vaf = (total_depth > 0) ? (float)alt_depth / total_depth : 0.5f;
+                free(ad);
+            } else {
+                // Fallback: use 0.5 if VAF not available
+                s.vaf = 0.5f;
+                std::cerr << "Warning: No VAF/AF/AD info for " << s.chrom << ":" << s.pos 
+                          << ", using default 0.5\n";
+            }
+        }
 
         snvs.push_back(s);
     }
@@ -184,6 +207,7 @@ void compareSNVs(const SNV& s1, const SNV& s2,
     }
 
     out << s1.chrom << "\t" << s1.pos << "\t" << s2.pos
+        << "\tVAF1=" << s1.vaf << "\tVAF2=" << s2.vaf
         << "\tALT_ALT=" << altAlt
         << "\tALT_REF=" << altRef
         << "\tREF_ALT=" << refAlt
