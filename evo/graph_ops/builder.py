@@ -36,6 +36,9 @@ class GraphBuilder:
         self.size: Dict[int, int] = {}
         self.cluster_nodes: Dict[int, Set[int]] = {}
 
+        # Node-level VAFs (one VAF per SNV/node)
+        self.node_vaf: Dict[int, float] = {}
+
         # Rejected edges and reasons
         self.inconsistencies: List[Dict] = []
 
@@ -72,6 +75,30 @@ class GraphBuilder:
         del self.cluster_nodes[rb]
         return ra
 
+    # -------- Public DSU accessors (for stats/export) --------
+
+    def get_cluster_rep(self, x: int) -> int:
+        """Return the cooccurrence-cluster representative for node x."""
+        self._ensure_node_dsu(x)
+        return self._find(x)
+
+    def get_cluster_sizes(self) -> Dict[int, int]:
+        """Return {rep: size} for all current cooccurrence clusters."""
+        return {rep: len(nodes) for rep, nodes in self.cluster_nodes.items()}
+
+    # -------- VAF registration --------
+
+    def _register_node_vaf(self, node: int, vaf: float) -> None:
+        """
+        Record VAF for a node if not already set.
+
+        We assume VAF is an intrinsic property of the SNV; if multiple edges
+        mention the same node with slightly different VAFs, we keep the first
+        one and ignore later discrepancies.
+        """
+        if node not in self.node_vaf:
+            self.node_vaf[node] = vaf
+
     # -------- Timing cycle check --------
 
     def _exists_directed_path(self, start: int, target: int) -> bool:
@@ -97,40 +124,41 @@ class GraphBuilder:
         new_edge: Edge,
         conflict_edge: Optional[Edge],
         reason: str,
-        details: str = "",
-    ) -> None:
+    ):
+        # Read counts for the skipped edge
+        read_counts_str = (
+            f"{new_edge.alt_alt}/{new_edge.alt_ref}/"
+            f"{new_edge.ref_alt}/{new_edge.ref_ref}"
+        )
+
         rec = {
             "u": new_edge.u,
             "v": new_edge.v,
             "relation": new_edge.relation,
             "loss": new_edge.loss,
             "reliability": new_edge.reliability,
+            "read_counts": read_counts_str,   # ALT_ALT/ALT_REF/REF_ALT/REF_REF
             "reason": reason,
             "conflict_u": None,
             "conflict_v": None,
-            "conflict_relation": None,
-            "conflict_loss": None,
+            "conflict_relation_label": None,  # e.g. "timing_loss", "cooccurring"
             "conflict_reliability": None,
-            "details": details,
         }
-
-        if reason == "timing_cycle" and not details:
-            rec["details"] = (
-                f"adding timing edge {new_edge.u} -> {new_edge.v} would create a cycle: "
-                f"there exists a directed path from {new_edge.v} back to {new_edge.u}"
-            )
 
         if conflict_edge is not None:
             rec["conflict_u"] = conflict_edge.u
             rec["conflict_v"] = conflict_edge.v
-            rec["conflict_relation"] = conflict_edge.relation
-            rec["conflict_loss"] = conflict_edge.loss
+            # Combine relation + loss into a single label
+            if conflict_edge.loss:
+                rec["conflict_relation_label"] = f"{conflict_edge.relation}_loss"
+            else:
+                rec["conflict_relation_label"] = conflict_edge.relation
             rec["conflict_reliability"] = conflict_edge.reliability
 
         self.inconsistencies.append(rec)
 
-    # -------- Cooccurring cluster merge check --------
 
+    # -------- Cooccurring cluster merge check --------
     def _check_cooccurring_merge_ok(self, u: int, v: int, new_edge: Edge) -> bool:
         """
         Check if merging clusters of u and v via a cooccurring edge is allowed:
@@ -160,11 +188,6 @@ class GraphBuilder:
                         new_edge,
                         e2,
                         "cluster_merge_noncooccurring",
-                        details=(
-                            f"merging clusters of {u} and {v} would place nodes "
-                            f"{x} and {y} in the same cluster while they are "
-                            f"connected by a non-cooccurring edge"
-                        ),
                     )
                     return False
 
@@ -227,7 +250,6 @@ class GraphBuilder:
                     edge,
                     None,
                     "cluster_internal_timing",
-                    details="timing relation within a cooccurrence cluster is forbidden",
                 )
                 return False
 
@@ -243,7 +265,6 @@ class GraphBuilder:
                     edge,
                     None,
                     "cluster_internal_divergent",
-                    details="divergent relation within a cooccurrence cluster is forbidden",
                 )
                 return False
 
@@ -254,6 +275,9 @@ class GraphBuilder:
 
         self.nodes.add(u)
         self.nodes.add(v)
+        self._register_node_vaf(u, edge.vaf_u)
+        self._register_node_vaf(v, edge.vaf_v)
+
         self.edges.append(edge)
         self.pair_edge[key] = edge
 

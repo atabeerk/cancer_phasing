@@ -44,7 +44,7 @@ std::vector<SNV> readVCF(const std::string& vcfFile) {
         s.ref = ref[0];
         s.alt = alt[0];
 
-                float* af = NULL;
+        float* af = NULL;
         int naf = 0;
         if (bcf_get_info_float(hdr, rec, "AF", &af, &naf) > 0 && naf > 0) {
             s.vaf = af[0];

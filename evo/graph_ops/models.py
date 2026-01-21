@@ -7,16 +7,26 @@ from dataclasses import dataclass
 class Edge:
     """
     Minimal edge representation for SNV relationships.
-
-    u, v: integer positions (same chromosome; chunk is per-chrom)
-    relation: "cooccurring" | "timing" | "divergent"
-    loss: True if this is a *_loss relation, otherwise False
-    reliability: numeric reliability score from C++ output
-    source_file: which file this edge came from (for debugging / logging)
     """
-    u: int
-    v: int
-    relation: str   # "cooccurring" | "timing" | "divergent"
+
+    chrom: str            # chromosome string (from C++ file)
+
+    u: int                # pos1 in oriented graph (source)
+    v: int                # pos2 in oriented graph (target)
+
+    relation: str         # "cooccurring" | "timing" | "divergent"
     loss: bool
-    reliability: float
+    reliability: float    # RELIABILITY from C++ output
+
+    alt_alt: int = 0
+    alt_ref: int = 0
+    ref_alt: int = 0
+    ref_ref: int = 0
+
+    vaf_u: float = 0.0    # VAF for u
+    vaf_v: float = 0.0    # VAF for v
+
+    best_score: float = 0.0   # BEST_SCORE from C++
+    margin: float = 0.0       # MARGIN from C++
+
     source_file: str = ""

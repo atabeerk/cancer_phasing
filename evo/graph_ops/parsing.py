@@ -1,24 +1,25 @@
+# graph_ops/parsing.py
+
 import os
 from typing import List, Tuple, Dict
 
 from models import Edge
 
 
-def parse_snv_line(line: str) -> Tuple[int, int, float, Dict[str, str]]:
+def parse_snv_line(line: str) -> Tuple[str, int, int, Dict[str, str]]:
     """
-    Parse a line of the per-relationship C++ output, e.g.:
+    Parse a line like:
 
-      chr1 123 456 VAF1=... VAF2=... ... RELIABILITY=0.82 BEST_SCORE=... MARGIN=...
+      chr7 119138007 119143860 VAF1=... VAF2=... ALT_ALT=... ALT_REF=...
+      REF_ALT=... REF_REF=... TOTAL=... RELIABILITY=... BEST_SCORE=... MARGIN=...
 
-    Returns (pos1, pos2, reliability, kv_dict).
+    Returns (chrom, pos1, pos2, kv_dict) where kv_dict contains the key=value tokens.
     """
     parts = line.strip().split()
     if len(parts) < 3:
         raise ValueError(f"Line too short: {line!r}")
 
-    # First 3 columns: chr, pos1, pos2
-    # We ignore chr; the chunk is per-chromosome.
-    _chr = parts[0]
+    chrom = parts[0]
     pos1 = int(parts[1])
     pos2 = int(parts[2])
 
@@ -29,8 +30,7 @@ def parse_snv_line(line: str) -> Tuple[int, int, float, Dict[str, str]]:
         key, val = token.split("=", 1)
         kv[key] = val
 
-    reliability = float(kv.get("RELIABILITY", "0.0"))
-    return pos1, pos2, reliability, kv
+    return chrom, pos1, pos2, kv
 
 
 def load_edges_from_base(base_path: str) -> List[Edge]:
@@ -51,7 +51,10 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
 
     and ignores base + "_errors.txt".
     """
-    suffixes = {
+
+    # Map file suffix → (relation, loss_flag, orientation)
+    # orientation is only meaningful for timing; for undirected, use "undirected".
+    suffixes: Dict[str, Tuple[str, bool, str]] = {
         "_cooccurring.txt": ("cooccurring", False, "undirected"),
         "_cooccurring_loss.txt": ("cooccurring", True, "undirected"),
         "_divergent.txt": ("divergent", False, "undirected"),
@@ -75,32 +78,59 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                 if not line:
                     continue
 
-                pos1, pos2, reliability, _kv = parse_snv_line(line)
+                chrom, pos1, pos2, kv = parse_snv_line(line)
 
+                # Read counts (default to 0 if missing for any reason)
+                alt_alt = int(kv.get("ALT_ALT", "0"))
+                alt_ref = int(kv.get("ALT_REF", "0"))
+                ref_alt = int(kv.get("REF_ALT", "0"))
+                ref_ref = int(kv.get("REF_REF", "0"))
+
+                # VAFs
+                vaf1 = float(kv.get("VAF1", "0.0"))
+                vaf2 = float(kv.get("VAF2", "0.0"))
+
+                # Reliability and scoring info from C++
+                reliability = float(kv.get("RELIABILITY", "0.0"))
+                best_score = float(kv.get("BEST_SCORE", "0.0"))
+                margin = float(kv.get("MARGIN", "0.0"))
+
+                # For timing relations, orient u->v using snp1_before_snp2 vs snp2_before_snp1
                 if relation == "timing":
-                    # Encode direction as u -> v (u is earlier in time)
                     if orientation == "1_before_2":
                         u, v = pos1, pos2
+                        vaf_u, vaf_v = vaf1, vaf2
                     elif orientation == "2_before_1":
                         u, v = pos2, pos1
+                        vaf_u, vaf_v = vaf2, vaf1
                     else:
                         raise ValueError(f"Unexpected timing orientation: {orientation}")
                 else:
-                    # For undirected relationships, orientation doesn't matter
+                    # Undirected relations: just keep the file order
                     u, v = pos1, pos2
+                    vaf_u, vaf_v = vaf1, vaf2
 
                 edges.append(
                     Edge(
+                        chrom=chrom,
                         u=u,
                         v=v,
                         relation=relation,
                         loss=loss,
                         reliability=reliability,
+                        alt_alt=alt_alt,
+                        alt_ref=alt_ref,
+                        ref_alt=ref_alt,
+                        ref_ref=ref_ref,
+                        vaf_u=vaf_u,
+                        vaf_v=vaf_v,
+                        best_score=best_score,
+                        margin=margin,
                         source_file=path,
                     )
                 )
 
-    # Sort by reliability descending so the most reliable edges are considered first
+    # Sort edges by reliability descending so the most reliable are considered first.
     edges.sort(key=lambda e: e.reliability, reverse=True)
     return edges
 
@@ -114,7 +144,6 @@ def find_chunk_bases(chunk_dir: str) -> List[str]:
     file names (without the .txt). We skip the per-relation files like
     *_cooccurring.txt, *_divergent.txt, etc.
     """
-    # These suffixes belong to per-relation outputs; we don't want them as bases.
     relation_suffixes = [
         "_cooccurring.txt",
         "_cooccurring_loss.txt",
@@ -133,10 +162,9 @@ def find_chunk_bases(chunk_dir: str) -> List[str]:
         full = os.path.join(chunk_dir, fname)
 
         if any(fname.endswith(suf) for suf in relation_suffixes):
-            # it's one of the per-relation outputs, skip
             continue
 
-        # This should be the original chunk comparison file
+        # This should be the original chunk comparison file; strip '.txt' to get base
         base = full[: -len(".txt")]
         bases.append(base)
 

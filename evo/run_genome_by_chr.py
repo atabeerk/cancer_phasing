@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import sys
 import subprocess
 from pathlib import Path
@@ -17,14 +18,9 @@ def run_cmd(cmd):
     if process.returncode != 0:
         raise RuntimeError(f"Command failed ({process.returncode}): {' '.join(cmd)}")
 
+
 def get_chromosomes_from_bam(bam_path):
-    """Return (chrom, length) pairs for standard chromosomes only."""
-    import subprocess
-
-    # List of standard chromosomes
-    standard_chroms = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY", "chrM"]
-
-    # Get BAM idxstats
+    """Return (chrom, length) pairs for standard chromosomes only (chr or no-chr)."""
     cmd = ["samtools", "idxstats", bam_path]
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
@@ -33,13 +29,22 @@ def get_chromosomes_from_bam(bam_path):
         fields = line.split("\t")
         if len(fields) < 2:
             continue
-        chrom, length = fields[0], int(fields[1])
-        if chrom not in standard_chroms:
+
+        chrom = fields[0]
+        length = int(fields[1])
+
+        # Normalize: drop optional "chr" prefix for checking
+        c = chrom[3:] if chrom.startswith("chr") else chrom
+
+        # Keep only 1-22, X, Y, M, MT
+        if re.fullmatch(r"(?:[1-9]|1[0-9]|2[0-2]|X|Y|M|MT)", c) is None:
             print(f"Skipping non-standard contig {chrom}")
             continue
+
         chromosomes.append((chrom, length))
 
     return chromosomes
+
 
 
 def main():
@@ -51,7 +56,7 @@ def main():
     bam_path = sys.argv[2]
     outdir = os.path.abspath(sys.argv[3])
 
-    main_program = "./snv_occur"
+    main_program = "./main"
 
     # Validate inputs
     for f in [vcf_path, bam_path, main_program]:
@@ -85,7 +90,7 @@ def main():
         chrom_bam = os.path.join(pre_dir, f"{chrom}.bam")
         # Exclude unmapped, secondary, supplementary reads; MAPQ < 20
         run_cmd([
-            "samtools", "view", "-b", "-F", "2308", "-q", "20",
+            "samtools", "view", "-b", "-@", "4", "-F", "2308", "-q", "20",
             bam_path, region, "-o", chrom_bam
         ])
         run_cmd(["samtools", "index", chrom_bam])
