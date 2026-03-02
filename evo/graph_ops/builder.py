@@ -16,6 +16,10 @@ class GraphBuilder:
       - cooccurring clusters may contain only cooccurring edges internally
       - timing edges form an acyclic directed graph
       - nodes in the same cooccurring cluster may not have timing/divergent edges between them
+      - between any two cooccurring clusters, accepted non-cooccurring edges must
+        agree on a single relation mode:
+            * timing edges only, all in the same cluster direction, or
+            * divergent edges only
     """
 
     def __init__(self):
@@ -38,6 +42,13 @@ class GraphBuilder:
 
         # Node-level VAFs (one VAF per SNV/node)
         self.node_vaf: Dict[int, float] = {}
+
+        # Node-level chromosome labels (one chrom per SNV/node)
+        # NOTE: Node IDs in the JSON export are still the integer positions.
+        # The chromosome label is stored as an additional attribute.
+        self.node_chrom: Dict[int, str] = {}
+        # Node-level haplotype tags (e.g., HP1/HP2/UNKNOWN). Optional.
+        self.node_haplotype: Dict[int, str] = {}
 
         # Rejected edges and reasons
         self.inconsistencies: List[Dict] = []
@@ -98,6 +109,51 @@ class GraphBuilder:
         """
         if node not in self.node_vaf:
             self.node_vaf[node] = vaf
+
+    def _register_node_chrom(self, node: int, chrom: str, edge: Edge) -> bool:
+        """Record chromosome for a node, checking for internal consistency.
+
+        Returns True if the chromosome label is (or remains) consistent, False if
+        we detect a mismatch (we keep the original label in that case).
+        """
+        if node not in self.node_chrom:
+            self.node_chrom[node] = chrom
+            return True
+
+        if self.node_chrom[node] != chrom:
+            # This should not happen for per-chromosome chunk graphs, but if it
+            # does, we log it for visibility. We do NOT reject the edge here
+            # because the rest of the code assumes node IDs are positions.
+            self._log_conflict(edge, None, "node_chrom_mismatch")
+            return False
+
+        return True
+
+    def _register_node_haplotype(self, node: int, haplotype: Optional[str], edge: Edge) -> bool:
+        """
+        Record haplotype tag for a node, checking for internal consistency.
+        If conflicting non-empty tags are seen, mark node as MIXED.
+        """
+        if haplotype is None:
+            return True
+        hp = str(haplotype).strip().upper()
+        if not hp:
+            return True
+
+        existing = self.node_haplotype.get(node)
+        if existing is None:
+            self.node_haplotype[node] = hp
+            return True
+
+        if existing == hp:
+            return True
+
+        if existing == "MIXED":
+            return True
+
+        self.node_haplotype[node] = "MIXED"
+        self._log_conflict(edge, None, "node_haplotype_mismatch")
+        return False
 
     # -------- Timing cycle check --------
 
@@ -193,6 +249,66 @@ class GraphBuilder:
 
         return True
 
+    def _check_cluster_pair_relation_ok(self, u: int, v: int, new_edge: Edge) -> bool:
+        """
+        Enforce cluster-level consistency for non-cooccurring edges.
+
+        For the current cluster pair (cluster(u), cluster(v)):
+          - timing can coexist only with timing in the same direction
+          - divergent can coexist only with divergent
+        """
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            # Internal timing/divergent is checked elsewhere.
+            return True
+
+        # Iterate over smaller cluster for efficiency.
+        if len(self.cluster_nodes[ru]) <= len(self.cluster_nodes[rv]):
+            small_rep, large_rep = ru, rv
+        else:
+            small_rep, large_rep = rv, ru
+
+        new_from_rep = self._find(new_edge.u)
+        new_to_rep = self._find(new_edge.v)
+
+        for x in self.cluster_nodes[small_rep]:
+            for y, e2 in self.adj.get(x, {}).items():
+                # Only inspect edges crossing this same cluster boundary.
+                if self._find(y) != large_rep:
+                    continue
+
+                if new_edge.relation == "timing":
+                    if e2.relation != "timing":
+                        self._log_conflict(
+                            new_edge,
+                            e2,
+                            "cluster_pair_relation_conflict",
+                        )
+                        return False
+
+                    e2_from_rep = self._find(e2.u)
+                    e2_to_rep = self._find(e2.v)
+                    if e2_from_rep != new_from_rep or e2_to_rep != new_to_rep:
+                        self._log_conflict(
+                            new_edge,
+                            e2,
+                            "cluster_pair_timing_direction_conflict",
+                        )
+                        return False
+
+                elif new_edge.relation == "divergent":
+                    if e2.relation != "divergent":
+                        self._log_conflict(
+                            new_edge,
+                            e2,
+                            "cluster_pair_relation_conflict",
+                        )
+                        return False
+
+        return True
+
     # -------- Public API --------
 
     def try_add_edge(self, edge: Edge) -> bool:
@@ -253,6 +369,10 @@ class GraphBuilder:
                 )
                 return False
 
+            # Between two clusters, allow only timing in one direction OR divergent.
+            if not self._check_cluster_pair_relation_ok(u, v, edge):
+                return False
+
             # Enforce DAG: adding u -> v must not create a cycle
             if self._exists_directed_path(v, u):
                 self._log_conflict(edge, None, "timing_cycle")
@@ -268,6 +388,10 @@ class GraphBuilder:
                 )
                 return False
 
+            # Between two clusters, allow only timing in one direction OR divergent.
+            if not self._check_cluster_pair_relation_ok(u, v, edge):
+                return False
+
         else:
             raise ValueError(f"Unknown relation: {edge.relation}")
 
@@ -275,6 +399,11 @@ class GraphBuilder:
 
         self.nodes.add(u)
         self.nodes.add(v)
+        # Record per-node chromosome labels for downstream JSON export.
+        self._register_node_chrom(u, edge.chrom, edge)
+        self._register_node_chrom(v, edge.chrom, edge)
+        self._register_node_haplotype(u, edge.hap_u, edge)
+        self._register_node_haplotype(v, edge.hap_v, edge)
         self._register_node_vaf(u, edge.vaf_u)
         self._register_node_vaf(v, edge.vaf_v)
 

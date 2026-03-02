@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <map>
 #include <vector>
+#include <cmath>
+#include <algorithm>
 
 using namespace std;
 
@@ -21,6 +23,8 @@ struct SNPEntry {
     
     float vaf1 = 0.5f;
     float vaf2 = 0.5f;
+    string hap1 = "UNKNOWN";
+    string hap2 = "UNKNOWN";
 };
 
 SNPEntry parseLine(const string& line) {
@@ -42,6 +46,10 @@ SNPEntry parseLine(const string& line) {
             e.vaf1 = stof(val_str);
         } else if (key == "VAF2") {
             e.vaf2 = stof(val_str);
+        } else if (key == "HAP1") {
+            e.hap1 = val_str;
+        } else if (key == "HAP2") {
+            e.hap2 = val_str;
         } else if (key == "ALT_ALT") {
             e.ALT_ALT = stoi(val_str);
         } else if (key == "ALT_REF") {
@@ -314,6 +322,32 @@ float coverageWeight(int support, float scale) {
 }
 
 
+static inline float clamp01(float x) {
+    return (x < 0.0f) ? 0.0f : ((x > 1.0f) ? 1.0f : x);
+}
+
+
+// Symmetric ratio r >= 1, with a floor on the denominator to avoid blow-ups at tiny VAF.
+static inline float vaf_ratio(float v1, float v2) {
+    const float vmin_floor = 0.02f;   // denominator floor for ratio
+    
+    float lo = std::min(v1, v2);
+    float hi = std::max(v1, v2);
+    lo = std::max(lo, vmin_floor);
+    return hi / lo; // always >= 1
+}
+
+// Piecewise linear: 1 until r0, then linearly to 0 at rmax.
+static inline float cooccurring_prior_from_ratio(float r) {
+    const float r0   = 1.15f;   // no coocc penalty until <=15% ratio diff
+    const float rmax = 1.50f;   // coocc prior -> 0 by 50% ratio diff
+
+    if (r <= r0) return 1.0f;
+    if (r >= rmax) return 0.0f;
+    return 1.0f - (r - r0) / (rmax - r0);
+}
+
+
 Classification classifyEntry(const SNPEntry& e, int minReads, float coverageScale) {
     // Calculate reliability for all relationship types (pattern-based)
     map<string, float> reliabilities;
@@ -324,6 +358,26 @@ Classification classifyEntry(const SNPEntry& e, int minReads, float coverageScal
     reliabilities["divergent"] = calculateReliabilityForRelationship(e, "divergent", minReads);
     reliabilities["snp1_before_snp2_loss"] = calculateReliabilityForRelationship(e, "snp1_before_snp2_loss", minReads);
     reliabilities["snp2_before_snp1_loss"]  = calculateReliabilityForRelationship(e, "snp2_before_snp1_loss", minReads);
+
+    // --- Compute ratio-based distance ---
+    const float r = vaf_ratio(e.vaf1, e.vaf2);
+
+    // --- Compute priors ---
+    const float eps  = 0.05f;   // timing prior floor (prevents hard zero)
+
+    const float p_co = clamp01(cooccurring_prior_from_ratio(r));
+    const float p_tim = clamp01(eps + (1.0f - eps) * (1.0f - p_co));
+
+    // --- Apply priors (multiplicative) ---
+    // Cooccurring gets boosted when VAFs are similar (p_co close to 1)
+    reliabilities["cooccurring"]      *= p_co;
+    reliabilities["cooccurring_loss"] *= p_co;
+
+    // Timing gets punished when VAFs are similar
+    reliabilities["snp1_before_snp2"]      *= p_tim;
+    reliabilities["snp2_before_snp1"]      *= p_tim;
+    reliabilities["snp1_before_snp2_loss"] *= p_tim;
+    reliabilities["snp2_before_snp1_loss"] *= p_tim;
 
     // Find best and second-best pattern scores
     string best_type = "error";
@@ -432,6 +486,8 @@ void processFile(const string& filename, int minReads) {
             e.chr + string(" ") + to_string(e.pos1) + " " + to_string(e.pos2) + " "
             "VAF1=" + to_string(e.vaf1) + " "
             "VAF2=" + to_string(e.vaf2) + " "
+            "HAP1=" + e.hap1 + " "
+            "HAP2=" + e.hap2 + " "
             "ALT_ALT=" + to_string(e.ALT_ALT) + " "
             "ALT_REF=" + to_string(e.ALT_REF) + " "
             "REF_ALT=" + to_string(e.REF_ALT) + " "

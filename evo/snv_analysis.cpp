@@ -78,12 +78,12 @@ std::vector<SNV> readVCF(const std::string& vcfFile) {
 }
 
 
-// ---- Parse mpileup (-s), but use VCF ref bases ----
+// ---- Parse mpileup and read HP tags directly from output-extra columns ----
 std::unordered_map<std::string, PositionInfo> readMpileup(
     const std::string& mpileupFile,
     const std::vector<SNV>& snvs)
 {
-    // Create lookup: chrom:pos → (ref, alt)
+    // Create lookup: chrom:pos -> (ref, alt)
     std::unordered_map<std::string, std::pair<char, char>> refAltLookup;
     for (const auto& s : snvs) {
         std::string key = s.chrom + ":" + std::to_string(s.pos);
@@ -102,18 +102,15 @@ std::unordered_map<std::string, PositionInfo> readMpileup(
         if (line.empty()) continue;
 
         std::istringstream iss(line);
-        std::string chrom, bases, quality, readNamesStr;
+        std::string chrom, bases, quality, readNamesStr, hpTagsStr;
         int pos, depth;
-        char ref; // will be ignored (always 'N')
+        char ref;
 
         iss >> chrom >> pos >> ref >> depth >> bases >> quality;
-        std::getline(iss, readNamesStr);
+        iss >> readNamesStr;
+        iss >> hpTagsStr;
         if (readNamesStr.empty()) continue;
 
-        while (!readNamesStr.empty() && std::isspace(readNamesStr[0]))
-            readNamesStr.erase(0, 1);
-
-        // Split read names by comma
         std::vector<std::string> readNames;
         size_t start = 0, end = 0;
         while ((end = readNamesStr.find(',', start)) != std::string::npos) {
@@ -122,30 +119,37 @@ std::unordered_map<std::string, PositionInfo> readMpileup(
         }
         readNames.push_back(readNamesStr.substr(start));
 
-        // Parse the bases column — skip over +/− sequences
+        std::vector<std::string> hpTags;
+        if (!hpTagsStr.empty()) {
+            start = 0;
+            end = 0;
+            while ((end = hpTagsStr.find(',', start)) != std::string::npos) {
+                hpTags.push_back(hpTagsStr.substr(start, end - start));
+                start = end + 1;
+            }
+            hpTags.push_back(hpTagsStr.substr(start));
+        }
+
+        // Parse the bases column and skip +/- indel blocks.
         std::string parsedBases;
         for (size_t i = 0; i < bases.size();) {
             char c = bases[i];
 
             if (c == '+' || c == '-') {
-                // Parse the number following +/-
                 size_t j = i + 1;
                 std::string num;
                 while (j < bases.size() && std::isdigit(bases[j])) {
                     num += bases[j++];
                 }
                 int len = std::stoi(num);
-                // Skip the inserted/deleted bases
                 j += len;
                 i = j;
                 continue;
             }
 
-            // Ignore read start (^) and end ($) markers
             if (c == '^') { i += 2; continue; }
             if (c == '$') { i += 1; continue; }
 
-            // Otherwise, it's a real base call
             parsedBases += c;
             ++i;
         }
@@ -153,8 +157,7 @@ std::unordered_map<std::string, PositionInfo> readMpileup(
         if (readNames.size() != parsedBases.size()) {
             std::cerr << "Warning: read count != parsed base count at "
                       << chrom << ":" << pos
-                      << " (" << readNames.size() << " vs "
-                      << parsedBases.size() << ")\n";
+                      << " (" << readNames.size() << " vs " << parsedBases.size() << ")\n";
         }
 
         std::string key = chrom + ":" + std::to_string(pos);
@@ -162,8 +165,14 @@ std::unordered_map<std::string, PositionInfo> readMpileup(
         info.ref = refAltLookup[key].first;
         info.alt = refAltLookup[key].second;
 
-        for (size_t i = 0; i < std::min(readNames.size(), parsedBases.size()); ++i)
+        for (size_t i = 0; i < std::min(readNames.size(), parsedBases.size()); ++i) {
             info.readBase[readNames[i]] = parsedBases[i];
+            if (i < hpTags.size()) {
+                const std::string& hp = hpTags[i];
+                if (hp == "1") info.readHP[readNames[i]] = 1;
+                else if (hp == "2") info.readHP[readNames[i]] = 2;
+            }
+        }
 
         mp[key] = info;
     }
@@ -172,6 +181,22 @@ std::unordered_map<std::string, PositionInfo> readMpileup(
 }
 
 
+static std::string majorityHaplotypeForAltSupportingReads(const PositionInfo& p) {
+    int hp1 = 0;
+    int hp2 = 0;
+    for (const auto& [read, base] : p.readBase) {
+        bool isAlt = (std::toupper(base) == std::toupper(p.alt));
+        if (!isAlt) continue;
+        auto itHP = p.readHP.find(read);
+        if (itHP == p.readHP.end()) continue;
+        if (itHP->second == 1) hp1++;
+        else if (itHP->second == 2) hp2++;
+    }
+
+    if (hp1 == 0 && hp2 == 0) return "UNKNOWN";
+    if (hp1 == hp2) return "MIXED";
+    return (hp1 > hp2) ? "HP1" : "HP2";
+}
 
 void compareSNVs(const SNV& s1, const SNV& s2,
                  const PositionInfo& p1, const PositionInfo& p2,
@@ -206,11 +231,17 @@ void compareSNVs(const SNV& s1, const SNV& s2,
         else if (!isAlt1 && !isAlt2) refRef++;
     }
 
+    const std::string hap1 = majorityHaplotypeForAltSupportingReads(p1);
+    const std::string hap2 = majorityHaplotypeForAltSupportingReads(p2);
+
     out << s1.chrom << "\t" << s1.pos << "\t" << s2.pos
         << "\tVAF1=" << s1.vaf << "\tVAF2=" << s2.vaf
         << "\tALT_ALT=" << altAlt
         << "\tALT_REF=" << altRef
         << "\tREF_ALT=" << refAlt
         << "\tREF_REF=" << refRef
-        << "\tTOTAL=" << (altAlt + altRef + refAlt + refRef) << "\n";
+        << "\tTOTAL=" << (altAlt + altRef + refAlt + refRef)
+        << "\tHAP1=" << hap1
+        << "\tHAP2=" << hap2
+        << "\n";
 }

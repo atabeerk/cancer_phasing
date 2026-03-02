@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
-import os
 import pandas as pd
 from pathlib import Path
 import tarfile
-from pathlib import Path
 
 
 def summarize_component_stats(stats_file):
-    import pandas as pd
-
     df = pd.read_csv(stats_file, sep="\t")
 
     # Handle empty files
@@ -158,7 +154,6 @@ def main(main_output_dir):
         print("No summaries found. Exiting.")
         return
 
-    import pandas as pd
     df_all = pd.DataFrame(all_summaries)
 
     # --- Sort chromosomes properly ---

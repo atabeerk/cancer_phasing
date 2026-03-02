@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Any, Set, Tuple, Optional
+from typing import Dict, List, Any, Set, Optional
 import csv
-import math
 
 from builder import GraphBuilder
 
@@ -134,6 +132,16 @@ def compute_component_statistics_rows(
 
                 "haplotypes": haplotypes,
                 "multi_node_haplotypes": multi_node_haplotypes,
+
+                # Copy-number annotation fields are populated during postprocessing
+                # when a CN BED file is provided.
+                "cn_copy_number_state": "NA",
+                "cn_segment_start": "NA",
+                "cn_segment_end": "NA",
+                "cn_overlap_bp": "NA",
+                "cn_segment_coverage": "NA",
+                "cn_segment_confidence": "NA",
+                "cn_haplotype_source": "NA",
 
                 "nodes": ",".join(str(x) for x in comp_nodes_sorted),
             }

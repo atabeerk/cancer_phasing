@@ -1,6 +1,7 @@
 # graph_ops/models.py
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -30,3 +31,5 @@ class Edge:
     margin: float = 0.0       # MARGIN from C++
 
     source_file: str = ""
+    hap_u: Optional[str] = None
+    hap_v: Optional[str] = None

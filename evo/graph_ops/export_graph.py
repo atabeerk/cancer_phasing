@@ -2,6 +2,7 @@
 
 import json
 import csv
+from collections import Counter
 from typing import Optional
 
 from builder import GraphBuilder
@@ -19,8 +20,10 @@ def export_cytoscape_json(
         {
           "data": {
             "id": "<pos>",
+            "chrom": "<chr>",   # chromosome label for this SNV/node
             "position": <pos>,
-            "vaf": <float>      # VAF for this SNV/node
+            "vaf": <float>,     # VAF for this SNV/node
+            "haplotype": "<HP1|HP2|UNKNOWN|MIXED>"
           }
         }
 
@@ -46,9 +49,13 @@ def export_cytoscape_json(
     nodes_json = []
     for pos in sorted(builder.nodes):
         data = {"id": str(pos), "position": pos}
+        chrom = builder.node_chrom.get(pos)
+        if chrom is not None:
+            data["chrom"] = chrom
         vaf = builder.node_vaf.get(pos)
         if vaf is not None:
             data["vaf"] = vaf
+        data["haplotype"] = builder.node_haplotype.get(pos, "UNKNOWN")
         nodes_json.append({"data": data})
 
     # Edges with directed flag and read counts / label
@@ -100,11 +107,15 @@ def export_condensed_cytoscape_json(
         {
           "data": {
             "id": "<cluster_rep>",
+            "chrom": "<chr>",                        # chromosome for the cluster
             "cluster_id": <cluster_rep>,            # numeric representative
             "position": <one member SNV position>,  # representative position
             "members": [pos1, pos2, ...],           # all SNVs in this cluster
             "cluster_size": <int>,
             "vaf": <float>,                         # mean VAF over members (if available)
+            "haplotype": "<majority haplotype>",
+            "mixed_haplotypes": <bool>,
+            "haplotype_counts": {"HP1": n1, ...}
           }
         }
 
@@ -162,10 +173,26 @@ def export_condensed_cytoscape_json(
             "cluster_size": len(members),
         }
 
+        # All members should be on the same chromosome; store it for convenience.
+        chrom = builder.node_chrom.get(members[0]) if members else None
+        if chrom is not None:
+            data["chrom"] = chrom
+
         # Use the smallest position as a representative "position" for layout
         data["position"] = members[0]
         if mean_vaf is not None:
             data["vaf"] = mean_vaf
+
+        # Condensed node haplotype summary:
+        # choose majority haplotype; explicitly flag if mixed within cluster.
+        member_haps = [builder.node_haplotype.get(n, "UNKNOWN") for n in members]
+        hap_counts = Counter(member_haps)
+        top_hap, top_count = sorted(hap_counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        informative_haps = {h for h in hap_counts if h not in {"UNKNOWN", "MIXED"}}
+        data["haplotype"] = top_hap
+        data["mixed_haplotypes"] = ("MIXED" in hap_counts) or (len(informative_haps) > 1)
+        data["haplotype_counts"] = dict(sorted(hap_counts.items()))
+        data["haplotype_majority_fraction"] = (top_count / len(members)) if members else 0.0
 
         nodes_json.append({"data": data})
 
@@ -271,6 +298,16 @@ def write_inconsistency_log(builder: GraphBuilder, out_path: str) -> None:
       conflict_u, conflict_v: endpoints of the conflicting existing edge (if any)
       conflict_relation_label: relation+loss for the conflicting edge (e.g. "timing_loss")
       conflict_reliability  : reliability of the conflicting edge
+
+    Notable reason values include:
+      - pair_type_conflict
+      - pair_direction_conflict
+      - cluster_merge_noncooccurring
+      - cluster_internal_timing
+      - cluster_internal_divergent
+      - timing_cycle
+      - cluster_pair_relation_conflict
+      - cluster_pair_timing_direction_conflict
     """
     fieldnames = [
         "u",

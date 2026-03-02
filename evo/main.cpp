@@ -147,7 +147,7 @@ int main(int argc, char* argv[]) {
 
             // --- Run mpileup and store its output under pileup_files ---
             fs::path mpileup_out = pileupDir / ("mpileup_" + chrom + "_" + std::to_string(region_start) + ".out");
-            std::string cmd = "samtools mpileup -q 0 -Q 0 --output-QNAME -l " + pos_file.string() +
+            std::string cmd = "samtools mpileup -q 0 -Q 0 --output-QNAME --output-extra HP -l " + pos_file.string() +
                               " " + bamFile + " -o " + mpileup_out.string();
 
             std::cout << "Running command:\n" << cmd << "\n";

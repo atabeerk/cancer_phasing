@@ -1,9 +1,58 @@
 # graph_ops/parsing.py
 
 import os
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 
 from models import Edge
+
+
+def _first_present(kv: Dict[str, str], keys: List[str]) -> Optional[str]:
+    for k in keys:
+        if k in kv:
+            return kv[k]
+    return None
+
+
+def _normalize_haplotype_tag(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    s = str(raw).strip().upper()
+    if not s:
+        return None
+
+    alias = {
+        "1": "HP1",
+        "HP1": "HP1",
+        "H1": "HP1",
+        "HAP1": "HP1",
+        "HAPLOTYPE1": "HP1",
+        "2": "HP2",
+        "HP2": "HP2",
+        "H2": "HP2",
+        "HAP2": "HP2",
+        "HAPLOTYPE2": "HP2",
+        "UNK": "UNKNOWN",
+        "UNKNOWN": "UNKNOWN",
+        "NA": "UNKNOWN",
+        ".": "UNKNOWN",
+    }
+    return alias.get(s, s)
+
+
+def parse_haplotype_tags(kv: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parse optional haplotype tags for the two SNVs in a row.
+    Supports several key naming conventions for forward compatibility.
+    """
+    hap1_raw = _first_present(
+        kv,
+        ["HP1", "HAP1", "HAPLOTYPE1", "SNP1_HP", "SNP1_HAP", "SNP1_HAPLOTYPE"],
+    )
+    hap2_raw = _first_present(
+        kv,
+        ["HP2", "HAP2", "HAPLOTYPE2", "SNP2_HP", "SNP2_HAP", "SNP2_HAPLOTYPE"],
+    )
+    return _normalize_haplotype_tag(hap1_raw), _normalize_haplotype_tag(hap2_raw)
 
 
 def parse_snv_line(line: str) -> Tuple[str, int, int, Dict[str, str]]:
@@ -94,21 +143,26 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                 reliability = float(kv.get("RELIABILITY", "0.0"))
                 best_score = float(kv.get("BEST_SCORE", "0.0"))
                 margin = float(kv.get("MARGIN", "0.0"))
+                hap1, hap2 = parse_haplotype_tags(kv)
 
                 # For timing relations, orient u->v using snp1_before_snp2 vs snp2_before_snp1
                 if relation == "timing":
                     if orientation == "1_before_2":
                         u, v = pos1, pos2
                         vaf_u, vaf_v = vaf1, vaf2
+                        hap_u, hap_v = hap1, hap2
                     elif orientation == "2_before_1":
                         u, v = pos2, pos1
                         vaf_u, vaf_v = vaf2, vaf1
+                        alt_ref, ref_alt = ref_alt, alt_ref
+                        hap_u, hap_v = hap2, hap1
                     else:
                         raise ValueError(f"Unexpected timing orientation: {orientation}")
                 else:
                     # Undirected relations: just keep the file order
                     u, v = pos1, pos2
                     vaf_u, vaf_v = vaf1, vaf2
+                    hap_u, hap_v = hap1, hap2
 
                 edges.append(
                     Edge(
@@ -127,6 +181,8 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                         best_score=best_score,
                         margin=margin,
                         source_file=path,
+                        hap_u=hap_u,
+                        hap_v=hap_v,
                     )
                 )
 
