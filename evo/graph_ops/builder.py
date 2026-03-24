@@ -215,7 +215,7 @@ class GraphBuilder:
 
 
     # -------- Cooccurring cluster merge check --------
-    def _check_cooccurring_merge_ok(self, u: int, v: int, new_edge: Edge) -> bool:
+    def _check_cooccurring_merge_internal_consistency(self, u: int, v: int, new_edge: Edge) -> bool:
         """
         Check if merging clusters of u and v via a cooccurring edge is allowed:
         forbids any non-cooccurring edge between any two nodes that would end up
@@ -245,6 +245,69 @@ class GraphBuilder:
                         e2,
                         "cluster_merge_noncooccurring",
                     )
+                    return False
+
+        return True
+
+    def _check_cooccurring_merge_boundary_consistency(self, u: int, v: int, new_edge: Edge) -> bool:
+        """
+        Guard against creating mixed relation modes across cluster boundaries after
+        a cooccurring merge.
+
+        Why this exists:
+          - pair/cluster checks for timing/divergent run when those edges are added
+          - later cooccurring merges can collapse previously distinct cluster pairs
+            into one, which can accidentally combine:
+              * timing + divergent, or
+              * opposite timing directions
+            between the same merged cluster pair
+        """
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+
+        merged_nodes = self.cluster_nodes[ru] | self.cluster_nodes[rv]
+        # For each outside cluster, track one boundary relation signature:
+        #   ("divergent", None), ("timing", "out"), or ("timing", "in")
+        boundary_signature: Dict[int, Tuple[str, Optional[str]]] = {}
+        boundary_edge: Dict[int, Edge] = {}
+
+        for x in merged_nodes:
+            for y, e2 in self.adj.get(x, {}).items():
+                ry = self._find(y)
+                if ry == ru or ry == rv:
+                    # Internal to the to-be-merged cluster, handled elsewhere.
+                    continue
+
+                if e2.relation == "cooccurring":
+                    # Cooccurring edges are not expected across cluster boundaries.
+                    continue
+
+                if e2.relation == "timing":
+                    # "out" means merged cluster -> outside cluster.
+                    # "in"  means outside cluster -> merged cluster.
+                    direction = "out" if e2.u == x else "in"
+                    sig = ("timing", direction)
+                elif e2.relation == "divergent":
+                    sig = ("divergent", None)
+                else:
+                    # Defensive fallback; unknown relation types are rejected.
+                    self._log_conflict(new_edge, e2, "unknown_relation")
+                    return False
+
+                prev = boundary_signature.get(ry)
+                if prev is None:
+                    boundary_signature[ry] = sig
+                    boundary_edge[ry] = e2
+                    continue
+
+                if prev != sig:
+                    reason = "cluster_merge_pair_relation_conflict"
+                    if prev[0] == "timing" and sig[0] == "timing":
+                        reason = "cluster_merge_pair_timing_direction_conflict"
+                    self._log_conflict(new_edge, boundary_edge[ry], reason)
                     return False
 
         return True
@@ -309,6 +372,114 @@ class GraphBuilder:
 
         return True
 
+    def _build_cluster_timing_graph(self) -> Tuple[Dict[int, Set[int]], Dict[int, Set[int]]]:
+        """
+        Build cluster-level timing adjacency from currently accepted timing edges.
+        Returns (forward_adj, reverse_adj).
+        """
+        fwd: Dict[int, Set[int]] = defaultdict(set)
+        rev: Dict[int, Set[int]] = defaultdict(set)
+        for e in self.edges:
+            if e.relation != "timing":
+                continue
+            ru = self._find(e.u)
+            rv = self._find(e.v)
+            if ru == rv:
+                continue
+            fwd[ru].add(rv)
+            rev[rv].add(ru)
+        return fwd, rev
+
+    def _cluster_reachable(self, start_rep: int, target_rep: int, fwd: Dict[int, Set[int]]) -> bool:
+        """Check if there is a cluster-level timing path start_rep -> ... -> target_rep."""
+        if start_rep == target_rep:
+            return True
+        visited = {start_rep}
+        dq = deque([start_rep])
+        while dq:
+            cur = dq.popleft()
+            for nxt in fwd.get(cur, ()):
+                if nxt == target_rep:
+                    return True
+                if nxt not in visited:
+                    visited.add(nxt)
+                    dq.append(nxt)
+        return False
+
+    def _collect_cluster_reach(self, start_rep: int, adj: Dict[int, Set[int]]) -> Set[int]:
+        """Collect all cluster reps reachable from start_rep in given adjacency."""
+        out = {start_rep}
+        dq = deque([start_rep])
+        while dq:
+            cur = dq.popleft()
+            for nxt in adj.get(cur, ()):
+                if nxt not in out:
+                    out.add(nxt)
+                    dq.append(nxt)
+        return out
+
+    def _build_cluster_divergent_pairs(self) -> Set[Tuple[int, int]]:
+        """
+        Build set of cluster-level divergent boundaries as sorted rep tuples.
+        """
+        pairs: Set[Tuple[int, int]] = set()
+        for e in self.edges:
+            if e.relation != "divergent":
+                continue
+            ru = self._find(e.u)
+            rv = self._find(e.v)
+            if ru == rv:
+                continue
+            pairs.add((ru, rv) if ru <= rv else (rv, ru))
+        return pairs
+
+    def _check_divergent_not_ordered_by_timing(self, u: int, v: int, new_edge: Edge) -> bool:
+        """
+        Reject divergent edges when clusters are already timing-ordered
+        (directly or transitively) in either direction.
+        """
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+
+        fwd, _ = self._build_cluster_timing_graph()
+        if self._cluster_reachable(ru, rv, fwd) or self._cluster_reachable(rv, ru, fwd):
+            self._log_conflict(new_edge, None, "cluster_pair_divergent_timing_transitive_conflict")
+            return False
+        return True
+
+    def _check_timing_not_imply_divergent_conflict(self, u: int, v: int, new_edge: Edge) -> bool:
+        """
+        Reject a timing edge u->v if, after adding it at cluster level, any
+        ancestor of cluster(u) can reach any descendant of cluster(v) where that
+        ancestor/descendant cluster pair is already connected by a divergent edge.
+        """
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+
+        fwd, rev = self._build_cluster_timing_graph()
+        fwd[ru].add(rv)
+        rev[rv].add(ru)
+
+        ancestors = self._collect_cluster_reach(ru, rev)
+        descendants = self._collect_cluster_reach(rv, fwd)
+        divergent_pairs = self._build_cluster_divergent_pairs()
+
+        for a in ancestors:
+            for d in descendants:
+                if a == d:
+                    continue
+                key = (a, d) if a <= d else (d, a)
+                if key in divergent_pairs:
+                    self._log_conflict(new_edge, None, "cluster_pair_timing_implies_divergent_transitive_conflict")
+                    return False
+        return True
+
     # -------- Public API --------
 
     def try_add_edge(self, edge: Edge) -> bool:
@@ -356,7 +527,9 @@ class GraphBuilder:
         # ---- Relation-specific global rules ----
 
         if edge.relation == "cooccurring":
-            if not self._check_cooccurring_merge_ok(u, v, edge):
+            if not self._check_cooccurring_merge_internal_consistency(u, v, edge):
+                return False
+            if not self._check_cooccurring_merge_boundary_consistency(u, v, edge):
                 return False
 
         elif edge.relation == "timing":
@@ -371,6 +544,11 @@ class GraphBuilder:
 
             # Between two clusters, allow only timing in one direction OR divergent.
             if not self._check_cluster_pair_relation_ok(u, v, edge):
+                return False
+
+            # Disallow timing edges that make any existing divergent cluster pair
+            # become ordered by timing through transitive reachability.
+            if not self._check_timing_not_imply_divergent_conflict(u, v, edge):
                 return False
 
             # Enforce DAG: adding u -> v must not create a cycle
@@ -390,6 +568,11 @@ class GraphBuilder:
 
             # Between two clusters, allow only timing in one direction OR divergent.
             if not self._check_cluster_pair_relation_ok(u, v, edge):
+                return False
+
+            # Disallow divergent edges between clusters that are already ordered
+            # by timing via any directed path.
+            if not self._check_divergent_not_ordered_by_timing(u, v, edge):
                 return False
 
         else:

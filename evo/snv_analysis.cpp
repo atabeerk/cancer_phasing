@@ -3,11 +3,12 @@
 #include <fstream>
 #include <sstream>
 #include <cctype>
+#include <algorithm>
 #include <htslib/vcf.h>
 #include <htslib/hts.h>
 
 // ---- Parse VCF (.vcf or .vcf.gz) using htslib ----
-std::vector<SNV> readVCF(const std::string& vcfFile) {
+std::vector<SNV> readVCF(const std::string& vcfFile, const std::string& vcfSampleName) {
     std::vector<SNV> snvs;
 
     htsFile* fp = bcf_open(vcfFile.c_str(), "r");
@@ -31,6 +32,28 @@ std::vector<SNV> readVCF(const std::string& vcfFile) {
         return snvs;
     }
 
+    const int num_samples = bcf_hdr_nsamples(hdr);
+
+    int selected_sample_idx = -1;
+    if (!vcfSampleName.empty()) {
+        selected_sample_idx = bcf_hdr_id2int(hdr, BCF_DT_SAMPLE, vcfSampleName.c_str());
+        if (selected_sample_idx < 0) {
+            if (num_samples > 0) {
+                std::cerr << "Warning: sample '" << vcfSampleName
+                          << "' not found in VCF header; falling back to first sample '"
+                          << hdr->samples[0] << "'.\n";
+                selected_sample_idx = 0;
+            } else {
+                std::cerr << "Warning: sample '" << vcfSampleName
+                          << "' not found and VCF has no samples; falling back to defaults.\n";
+            }
+        }
+        if (selected_sample_idx >= 0) {
+            std::cerr << "Using VCF sample name '" << hdr->samples[selected_sample_idx]
+                      << "' for FORMAT/AD-derived VAF.\n";
+        }
+    }
+
     while (bcf_read(fp, hdr, rec) == 0) {
         bcf_unpack(rec, BCF_UN_ALL);
 
@@ -44,27 +67,97 @@ std::vector<SNV> readVCF(const std::string& vcfFile) {
         s.ref = ref[0];
         s.alt = alt[0];
 
-        float* af = NULL;
-        int naf = 0;
-        if (bcf_get_info_float(hdr, rec, "AF", &af, &naf) > 0 && naf > 0) {
-            s.vaf = af[0];
-            free(af);
-        } else {
-            // Try FORMAT/AD (allele depth) to calculate VAF
+        bool vaf_set = false;
+
+        // If a sample is specified (or fallback-selected), prefer its AD first,
+        // then try remaining samples in header order before defaulting to 0.5.
+        if (selected_sample_idx >= 0) {
             int32_t* ad = NULL;
             int nad = 0;
-            if (bcf_get_format_int32(hdr, rec, "AD", &ad, &nad) > 0 && nad >= 2) {
-                int ref_depth = ad[0];
-                int alt_depth = ad[1];
-                int total_depth = ref_depth + alt_depth;
-                s.vaf = (total_depth > 0) ? (float)alt_depth / total_depth : 0.5f;
-                free(ad);
-            } else {
-                // Fallback: use 0.5 if VAF not available
+            int nvals_total = bcf_get_format_int32(hdr, rec, "AD", &ad, &nad);
+            if (nvals_total > 0 && num_samples > 0) {
+                int vals_per_sample = nvals_total / num_samples;
+                if (vals_per_sample >= 2) {
+                    auto try_sample_ad = [&](int sample_idx) -> bool {
+                        int idx0 = sample_idx * vals_per_sample;
+                        if (idx0 + 1 >= nvals_total) return false;
+                        int32_t ref_depth = ad[idx0];
+                        int32_t alt_depth = ad[idx0 + 1];
+                        bool ref_ok = (ref_depth != bcf_int32_missing && ref_depth != bcf_int32_vector_end);
+                        bool alt_ok = (alt_depth != bcf_int32_missing && alt_depth != bcf_int32_vector_end);
+                        if (!ref_ok || !alt_ok) return false;
+                        int total_depth = static_cast<int>(ref_depth + alt_depth);
+                        s.vaf = (total_depth > 0) ? static_cast<float>(alt_depth) / total_depth : 0.5f;
+                        return true;
+                    };
+
+                    // 1) requested sample (or first sample if requested name missing)
+                    if (selected_sample_idx >= 0 && selected_sample_idx < num_samples) {
+                        vaf_set = try_sample_ad(selected_sample_idx);
+                    }
+
+                    // 2) other samples, in header order
+                    if (!vaf_set) {
+                        for (int sample_idx = 0; sample_idx < num_samples; ++sample_idx) {
+                            if (sample_idx == selected_sample_idx) continue;
+                            if (try_sample_ad(sample_idx)) {
+                                vaf_set = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (ad != NULL) free(ad);
+
+            if (!vaf_set) {
                 s.vaf = 0.5f;
-                std::cerr << "Warning: No VAF/AF/AD info for " << s.chrom << ":" << s.pos 
+                std::cerr << "Warning: No usable FORMAT/AD for sample '" << vcfSampleName
+                          << "' or any fallback sample at "
+                          << s.chrom << ":" << s.pos
                           << ", using default 0.5\n";
             }
+            snvs.push_back(s);
+            continue;
+        }
+
+        if (!vaf_set) {
+            float* af = NULL;
+            int naf = 0;
+            if (bcf_get_info_float(hdr, rec, "AF", &af, &naf) > 0 && naf > 0) {
+                s.vaf = af[0];
+                vaf_set = true;
+            }
+            if (af != NULL) free(af);
+        }
+
+        if (!vaf_set) {
+            // Fallback to FORMAT/AD first sample
+            int32_t* ad = NULL;
+            int nad = 0;
+            int nvals_total = bcf_get_format_int32(hdr, rec, "AD", &ad, &nad);
+            if (nvals_total > 0 && num_samples > 0) {
+                int vals_per_sample = nvals_total / num_samples;
+                if (vals_per_sample >= 2 && nvals_total >= 2) {
+                    int ref_depth = ad[0];
+                    int alt_depth = ad[1];
+                    bool ref_ok = (ref_depth != bcf_int32_missing && ref_depth != bcf_int32_vector_end);
+                    bool alt_ok = (alt_depth != bcf_int32_missing && alt_depth != bcf_int32_vector_end);
+                    if (ref_ok && alt_ok) {
+                        int total_depth = ref_depth + alt_depth;
+                        s.vaf = (total_depth > 0) ? (float)alt_depth / total_depth : 0.5f;
+                        vaf_set = true;
+                    }
+                }
+            }
+            if (ad != NULL) free(ad);
+        }
+
+        if (!vaf_set) {
+            // Fallback: use 0.5 if VAF not available
+            s.vaf = 0.5f;
+            std::cerr << "Warning: No VAF/AF/AD info for " << s.chrom << ":" << s.pos
+                      << ", using default 0.5\n";
         }
 
         snvs.push_back(s);

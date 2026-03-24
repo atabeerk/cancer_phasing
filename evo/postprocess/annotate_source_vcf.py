@@ -181,17 +181,116 @@ def normalize_haplotype_tag(hp: Optional[str]) -> str:
     return "UNKNOWN"
 
 
-def choose_cn_segments_for_haplotype(
-    haplotype: Optional[str],
+def _is_finite_number(x: Optional[float]) -> bool:
+    return x is not None and not math.isnan(x)
+
+
+def _sum_copy_number_states(cn1: Optional[float], cn2: Optional[float]) -> Optional[float]:
+    if _is_finite_number(cn1) and _is_finite_number(cn2):
+        return float(cn1) + float(cn2)
+    if _is_finite_number(cn1):
+        return float(cn1)
+    if _is_finite_number(cn2):
+        return float(cn2)
+    return None
+
+
+def build_dual_haplotype_cn_annotation(
+    chrom: str,
+    span_start: int,
+    span_end: int,
+    haplotype_hint: Optional[str],
     cn_segments_hp1: Dict[str, List[CnSegment]],
     cn_segments_hp2: Dict[str, List[CnSegment]],
-) -> Tuple[Dict[str, List[CnSegment]], str]:
-    hp = normalize_haplotype_tag(haplotype)
-    if hp == "HP1":
-        return cn_segments_hp1, "HP1"
-    if hp == "HP2":
-        return cn_segments_hp2, "HP2"
-    return {}, hp
+) -> Optional[Dict[str, Optional[Union[str, float, int]]]]:
+    """
+    Annotate a genomic span with CN information from BOTH haplotypes.
+
+    The two BEDs are treated independently (they do not need matching intervals):
+    we pick the best-overlap segment from HP1 and HP2 separately, then combine.
+    """
+    seg1, ov1 = best_cn_segment_for_span(cn_segments_hp1, chrom, span_start, span_end)
+    seg2, ov2 = best_cn_segment_for_span(cn_segments_hp2, chrom, span_start, span_end)
+
+    if seg1 is None and seg2 is None:
+        return None
+
+    total_cn = _sum_copy_number_states(
+        seg1.copy_number_state if seg1 is not None else None,
+        seg2.copy_number_state if seg2 is not None else None,
+    )
+
+    return {
+        "cn_hp1": seg1.copy_number_state if seg1 is not None else None,
+        "cn_hp2": seg2.copy_number_state if seg2 is not None else None,
+        "cn_total": total_cn,
+    }
+
+
+def write_merged_cn_segments_tsv(
+    out_path: Path,
+    cn_segments_hp1: Dict[str, List[CnSegment]],
+    cn_segments_hp2: Dict[str, List[CnSegment]],
+) -> int:
+    """
+    Write a merged CN table by splitting at all breakpoints from both haplotype BEDs.
+    This handles imperfectly aligned intervals by keeping HP1 and HP2 assignments
+    separately on each merged interval.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "chrom",
+        "start",
+        "end",
+        "cn_hp1",
+        "cn_hp2",
+        "cn_total",
+    ]
+    rows_written = 0
+    chroms = sorted(set(cn_segments_hp1.keys()) | set(cn_segments_hp2.keys()))
+    with open(out_path, "wt", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+
+        for chrom in chroms:
+            breakpoints: Set[int] = set()
+            for seg in cn_segments_hp1.get(chrom, []):
+                breakpoints.add(seg.start)
+                breakpoints.add(seg.end + 1)
+            for seg in cn_segments_hp2.get(chrom, []):
+                breakpoints.add(seg.start)
+                breakpoints.add(seg.end + 1)
+            points = sorted(breakpoints)
+            if len(points) < 2:
+                continue
+
+            for i in range(len(points) - 1):
+                start = points[i]
+                end = points[i + 1] - 1
+                if end < start:
+                    continue
+                ann = build_dual_haplotype_cn_annotation(
+                    chrom=chrom,
+                    span_start=start,
+                    span_end=end,
+                    haplotype_hint=None,
+                    cn_segments_hp1=cn_segments_hp1,
+                    cn_segments_hp2=cn_segments_hp2,
+                )
+                if ann is None:
+                    continue
+                writer.writerow(
+                    {
+                        "chrom": chrom,
+                        "start": start,
+                        "end": end,
+                        "cn_hp1": ann.get("cn_hp1"),
+                        "cn_hp2": ann.get("cn_hp2"),
+                        "cn_total": ann.get("cn_total"),
+                    }
+                )
+                rows_written += 1
+    return rows_written
 
 
 def iter_vcf_records(vcf_path: Path):
@@ -374,6 +473,52 @@ def annotate_uncondensed_graph_in_memory(
     return seen, annotated
 
 
+def annotate_uncondensed_graph_copy_number_in_memory(
+    graph_obj: dict,
+    cn_segments_hp1: Dict[str, List[CnSegment]],
+    cn_segments_hp2: Dict[str, List[CnSegment]],
+) -> Tuple[int, int]:
+    """
+    Annotate uncondensed graph nodes with CN values using node position.
+    For each node, pick the segment that overlaps [position, position]
+    using the same deterministic tie-breakers as condensed annotation.
+    """
+    elements = graph_obj.get("elements", {})
+    nodes = elements.get("nodes", [])
+
+    seen = 0
+    annotated = 0
+
+    for n in nodes:
+        data = n.get("data", {})
+        pos = data.get("position")
+        chrom = data.get("chrom")
+        if pos is None or chrom is None:
+            continue
+        try:
+            pos_i = int(pos)
+        except (TypeError, ValueError):
+            continue
+        seen += 1
+
+        ann = build_dual_haplotype_cn_annotation(
+            chrom=str(chrom),
+            span_start=pos_i,
+            span_end=pos_i,
+            haplotype_hint=data.get("haplotype"),
+            cn_segments_hp1=cn_segments_hp1,
+            cn_segments_hp2=cn_segments_hp2,
+        )
+        if ann is None:
+            continue
+
+        for k, v in ann.items():
+            data[k] = v
+        annotated += 1
+
+    return seen, annotated
+
+
 def annotate_condensed_graph_in_memory(
     graph_obj: dict,
     mapping: Dict[Tuple[str, int], Set[str]],
@@ -457,24 +602,19 @@ def annotate_condensed_graph_copy_number_in_memory(
         span_end = max(member_positions)
         seen += 1
 
-        hp_label = data.get("haplotype")
-        seg_table, hp_used = choose_cn_segments_for_haplotype(
-            hp_label, cn_segments_hp1, cn_segments_hp2
+        ann = build_dual_haplotype_cn_annotation(
+            chrom=str(chrom),
+            span_start=span_start,
+            span_end=span_end,
+            haplotype_hint=data.get("haplotype"),
+            cn_segments_hp1=cn_segments_hp1,
+            cn_segments_hp2=cn_segments_hp2,
         )
-        if not seg_table:
+        if ann is None:
             continue
 
-        seg, ov = best_cn_segment_for_span(seg_table, str(chrom), span_start, span_end)
-        if seg is None:
-            continue
-
-        data["cn_copy_number_state"] = seg.copy_number_state
-        data["cn_segment_start"] = seg.start
-        data["cn_segment_end"] = seg.end
-        data["cn_overlap_bp"] = ov
-        data["cn_segment_coverage"] = seg.coverage
-        data["cn_segment_confidence"] = seg.confidence
-        data["cn_haplotype_source"] = hp_used
+        for k, v in ann.items():
+            data[k] = v
         annotated += 1
 
     return seen, annotated
@@ -559,7 +699,7 @@ def annotate_component_statistics_file(
         rows = list(reader)
         fieldnames = list(reader.fieldnames)
 
-    cn_fields = [
+    legacy_cn_fields = [
         "cn_copy_number_state",
         "cn_segment_start",
         "cn_segment_end",
@@ -568,6 +708,11 @@ def annotate_component_statistics_file(
         "cn_segment_confidence",
         "cn_haplotype_source",
     ]
+    for fld in legacy_cn_fields:
+        if fld in fieldnames:
+            fieldnames.remove(fld)
+
+    cn_fields = ["cn_hp1", "cn_hp2", "cn_total"]
     for fld in cn_fields:
         if fld not in fieldnames:
             fieldnames.append(fld)
@@ -575,6 +720,8 @@ def annotate_component_statistics_file(
     seen = 0
     annotated = 0
     for row in rows:
+        for fld in legacy_cn_fields:
+            row.pop(fld, None)
         for fld in cn_fields:
             row.setdefault(fld, "NA")
 
@@ -595,23 +742,19 @@ def annotate_component_statistics_file(
         nodes_csv = str(row.get("nodes", ""))
         pos_to_hp = chunk_to_node_haplotype.get(chunk_base, {})
         hp_label = majority_haplotype_from_nodes(nodes_csv, pos_to_hp)
-        seg_table, hp_used = choose_cn_segments_for_haplotype(
-            hp_label, cn_segments_hp1, cn_segments_hp2
+        ann = build_dual_haplotype_cn_annotation(
+            chrom=str(chrom),
+            span_start=span_start,
+            span_end=span_end,
+            haplotype_hint=hp_label,
+            cn_segments_hp1=cn_segments_hp1,
+            cn_segments_hp2=cn_segments_hp2,
         )
-        if not seg_table:
+        if ann is None:
             continue
 
-        seg, ov = best_cn_segment_for_span(seg_table, str(chrom), span_start, span_end)
-        if seg is None:
-            continue
-
-        row["cn_copy_number_state"] = str(seg.copy_number_state)
-        row["cn_segment_start"] = str(seg.start)
-        row["cn_segment_end"] = str(seg.end)
-        row["cn_overlap_bp"] = str(ov)
-        row["cn_segment_coverage"] = str(seg.coverage)
-        row["cn_segment_confidence"] = str(seg.confidence)
-        row["cn_haplotype_source"] = hp_used
+        for fld, val in ann.items():
+            row[fld] = "NA" if val is None else str(val)
         annotated += 1
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -837,38 +980,82 @@ def main():
             f"[cn_bed_hp2] Loaded {cn_rows_kept_hp2}/{cn_rows_total_hp2} segment row(s) "
             f"across {len(cn_segments_hp2)} chromosome(s) from {cn_bed_hp2_path}"
         )
-        print("[cn_bed] Using haplotype-aware CN assignment (HP1 vs HP2) where haplotype tags are available.")
+        merged_cn_out_root = out_root if out_root is not None else main_out
+        merged_cn_path = merged_cn_out_root / "merged_haplotype_cn_segments.tsv"
+        merged_rows = write_merged_cn_segments_tsv(
+            out_path=merged_cn_path,
+            cn_segments_hp1=cn_segments_hp1,
+            cn_segments_hp2=cn_segments_hp2,
+        )
+        print(
+            f"[cn_bed_merged] Wrote {merged_rows} merged interval row(s) with HP1/HP2 CN values to "
+            f"{merged_cn_path}"
+        )
+        print(
+            "[cn_bed] Using dual-haplotype CN assignment (HP1 + HP2) with robust overlap matching; "
+            "output CN fields are: cn_hp1, cn_hp2, cn_total."
+        )
 
     timing_stats: Dict[str, Dict[str, int]] = {}
     total_seen = 0
     total_annotated = 0
+    total_ucn_seen = 0
+    total_ucn_annotated = 0
     total_timing_edges = 0
 
-    # 1) UNCONDENSED: source_vcf annotation + timing stats + write
-    if do_vcf:
+    # 1) UNCONDENSED: source_vcf annotation and/or CN annotation + write
+    if do_vcf or do_cn:
         for gf in uncondensed_files:
             with open(gf, "rt", encoding="utf-8") as f:
                 g = json.load(f)
 
-            seen, annotated = annotate_uncondensed_graph_in_memory(g, mapping)
-            total_seen += seen
-            total_annotated += annotated
+            seen = 0
+            annotated = 0
+            cn_seen = 0
+            cn_annot = 0
+            timing_edges_here = 0
 
-            timing_edges_here = update_timing_stats_from_uncondensed_graph(g, timing_stats)
-            total_timing_edges += timing_edges_here
+            if do_vcf:
+                seen, annotated = annotate_uncondensed_graph_in_memory(g, mapping)
+                total_seen += seen
+                total_annotated += annotated
+
+                timing_edges_here = update_timing_stats_from_uncondensed_graph(g, timing_stats)
+                total_timing_edges += timing_edges_here
+
+            if do_cn:
+                cn_seen, cn_annot = annotate_uncondensed_graph_copy_number_in_memory(
+                    g,
+                    cn_segments_hp1=cn_segments_hp1,
+                    cn_segments_hp2=cn_segments_hp2,
+                )
+                total_ucn_seen += cn_seen
+                total_ucn_annotated += cn_annot
 
             out_path = gf if out_root is None else (out_root / gf.relative_to(main_out))
             write_json(g, out_path, indent=args.indent)
-            print(f"[write] {gf}: annotated {annotated}/{seen} node(s); timing_edges={timing_edges_here} -> {out_path}")
+            print(
+                f"[write] {gf}: source_vcf={annotated}/{seen} "
+                f"cn={cn_annot}/{cn_seen} node(s); timing_edges={timing_edges_here} -> {out_path}"
+            )
 
-        # Timing stats TSV
-        stats_root = out_root if out_root is not None else main_out
-        stats_path = stats_root / args.stats_name
-        write_stats_tsv(timing_stats, stats_path)
+        if do_vcf:
+            # Timing stats TSV
+            stats_root = out_root if out_root is not None else main_out
+            stats_path = stats_root / args.stats_name
+            write_stats_tsv(timing_stats, stats_path)
 
-        print(f"[stats] Wrote: {stats_path}")
-        print(f"[done] Uncondensed: annotated {total_annotated}/{total_seen} node(s) across {len(uncondensed_files)} graph(s)")
-        print(f"[done] Uncondensed: processed {total_timing_edges} timing edge(s) total")
+            print(f"[stats] Wrote: {stats_path}")
+            print(
+                f"[done] Uncondensed: source_vcf annotated {total_annotated}/{total_seen} "
+                f"node(s) across {len(uncondensed_files)} graph(s)"
+            )
+            print(f"[done] Uncondensed: processed {total_timing_edges} timing edge(s) total")
+        if do_cn:
+            print(
+                f"[done] Uncondensed: CN annotated {total_ucn_annotated}/{total_ucn_seen} "
+                f"node(s) across {len(uncondensed_files)} graph(s)"
+            )
 
     # 2) CONDENSED: annotate source_vcf and/or CN on cluster nodes + write
     total_c_seen = 0

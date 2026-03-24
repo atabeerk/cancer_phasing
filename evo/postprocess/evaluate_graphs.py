@@ -2,7 +2,7 @@
 """
 evaluate_edges.py
 
-Evaluate timing/cooccurrence edges in uncondensed chunk graphs against a ground-truth tree.
+Evaluate timing/cooccurrence/divergent edges in uncondensed chunk graphs against a ground-truth tree.
 
 Directory layout expected:
   OUTDIR/
@@ -24,6 +24,8 @@ Rules:
 - Timing edge A->B is CORRECT iff node(A) is a STRICT ancestor of node(B).
   Timing between SNPs from the same node is an error.
 - Cooccurrence edge is CORRECT iff node(A) == node(B). (Undirected)
+- Divergent edge is CORRECT iff node(A) != node(B) and neither is an ancestor
+  (direct or indirect) of the other.
 
 UNKNOWN edge:
 - If either endpoint cannot be mapped to a tree node (missing node, missing source_vcf, label not in tree)
@@ -33,8 +35,11 @@ Outputs (only these):
 - edge_eval_summary.tsv (per chromosome + ALL, includes % consistent over known edges)
 - edge_eval_inconsistent_timing_edges.tsv (edge-level details)
 - edge_eval_inconsistent_cooccur_edges.tsv (edge-level details)
+- edge_eval_inconsistent_divergent_edges.tsv (edge-level details)
 - edge_eval_timing_nodepair_counts.tsv (genome-wide node-pair counts, ordered)
 - edge_eval_cooccur_nodepair_counts.tsv (genome-wide node-pair counts, unordered)
+- edge_eval_divergent_nodepair_counts.tsv (genome-wide node-pair counts, unordered)
+- edge_eval_vcfpair_relation_counts.tsv (VCF-label-pair counts by status/relation)
 """
 
 from __future__ import annotations
@@ -205,6 +210,30 @@ class ChrAgg:
     def __init__(self) -> None:
         self.timing = Counter()   # total/correct/incorrect/unknown
         self.cooccur = Counter()  # total/correct/incorrect/unknown
+        self.divergent = Counter()  # total/correct/incorrect/unknown
+
+
+# ---------------- Edge detail formatting ----------------
+
+def _edge_category_counts_text(edge_data: dict) -> str:
+    """
+    Build compact edge support string:
+      A/B/C/D | rel:XX
+    where A/B/C/D come from read_counts and XX is reliability.
+    """
+    read_counts = str(edge_data.get("read_counts") or "").strip()
+    parts = [p.strip() for p in read_counts.split("/")] if read_counts else []
+    if len(parts) != 4:
+        counts_text = "NA/NA/NA/NA"
+    else:
+        counts_text = "/".join(parts)
+    rel_raw = edge_data.get("reliability")
+    try:
+        rel = float(rel_raw)
+        rel_text = f"{rel:.2f}"
+    except (TypeError, ValueError):
+        rel_text = "NA"
+    return f"{counts_text} | rel:{rel_text}"
 
 
 # ---------------- Evaluation ----------------
@@ -220,9 +249,12 @@ def eval_graph_file(
     # edge-level inconsistent details
     inconsistent_timing_rows: List[Tuple],
     inconsistent_cooccur_rows: List[Tuple],
+    inconsistent_divergent_rows: List[Tuple],
     # genome-wide node-pair counts (known only)
     timing_pair_counts: Dict[Tuple[str, str], Counter],
     cooccur_pair_counts: Dict[Tuple[str, str], Counter],
+    divergent_pair_counts: Dict[Tuple[str, str], Counter],
+    vcfpair_relation_counts: Dict[Tuple[str, str], Counter],
 ) -> None:
     nodes, edges = load_graph_json(json_path)
 
@@ -255,7 +287,7 @@ def eval_graph_file(
     for e in edges:
         data = e.get("data", {}) if isinstance(e, dict) else {}
         relation = data.get("relation")
-        if relation not in ("timing", "cooccurring"):
+        if relation not in ("timing", "cooccurring", "divergent"):
             continue
 
         src_id = data.get("source")
@@ -268,16 +300,22 @@ def eval_graph_file(
 
         # If either endpoint node is missing in node list => unknown
         if src_info is None or dst_info is None:
+            vcfpair_relation_counts[("UNKNOWN", "UNKNOWN")]["unknown"] += 1
             if relation == "timing":
                 agg_by_chr[fallback_chr_label].timing["total"] += 1
                 agg_by_chr[fallback_chr_label].timing["unknown"] += 1
                 agg_all.timing["total"] += 1
                 agg_all.timing["unknown"] += 1
-            else:
+            elif relation == "cooccurring":
                 agg_by_chr[fallback_chr_label].cooccur["total"] += 1
                 agg_by_chr[fallback_chr_label].cooccur["unknown"] += 1
                 agg_all.cooccur["total"] += 1
                 agg_all.cooccur["unknown"] += 1
+            else:
+                agg_by_chr[fallback_chr_label].divergent["total"] += 1
+                agg_by_chr[fallback_chr_label].divergent["unknown"] += 1
+                agg_all.divergent["total"] += 1
+                agg_all.divergent["unknown"] += 1
             continue
 
         src_chr, src_pos, src_label = src_info
@@ -292,6 +330,11 @@ def eval_graph_file(
             and src_label in tree_nodes and dst_label in tree_nodes
         )
 
+        src_vcf_label = src_label if src_label is not None else "UNKNOWN"
+        dst_vcf_label = dst_label if dst_label is not None else "UNKNOWN"
+        # Keep VCF-pair direction for timing-aware displays (source -> target).
+        pair = (src_vcf_label, dst_vcf_label)
+
         if relation == "timing":
             agg_by_chr[chr_bucket].timing["total"] += 1
             agg_all.timing["total"] += 1
@@ -299,66 +342,120 @@ def eval_graph_file(
             if not known:
                 agg_by_chr[chr_bucket].timing["unknown"] += 1
                 agg_all.timing["unknown"] += 1
+                vcfpair_relation_counts[pair]["unknown"] += 1
                 continue
 
-            # known labels
+            src_anc_dst = is_ancestor_strict(src_label, dst_label, parent_of, depth)
+            dst_anc_src = is_ancestor_strict(dst_label, src_label, parent_of, depth)
+            vcfpair_relation_counts[pair]["known_total"] += 1
+
             if src_label == dst_label:
                 # incorrect timing within same node
                 agg_by_chr[chr_bucket].timing["incorrect"] += 1
                 agg_all.timing["incorrect"] += 1
                 timing_pair_counts[(src_label, dst_label)]["incorrect"] += 1
+                vcfpair_relation_counts[pair]["inconsistent_timing"] += 1
 
                 inconsistent_timing_rows.append((
-                    chr_bucket, src_chr, src_pos, src_label,
-                    dst_chr, dst_pos, dst_label,
+                    src_chr if src_chr == dst_chr else chr_bucket,
+                    src_pos, src_label,
+                    dst_pos, dst_label,
                     "same_node",
+                    _edge_category_counts_text(data),
                 ))
             else:
-                if is_ancestor_strict(src_label, dst_label, parent_of, depth):
+                reason = "no_ancestry_relation"
+                if src_anc_dst:
                     agg_by_chr[chr_bucket].timing["correct"] += 1
                     agg_all.timing["correct"] += 1
                     timing_pair_counts[(src_label, dst_label)]["correct"] += 1
+                    vcfpair_relation_counts[pair]["consistent_timing"] += 1
                 else:
                     agg_by_chr[chr_bucket].timing["incorrect"] += 1
                     agg_all.timing["incorrect"] += 1
                     timing_pair_counts[(src_label, dst_label)]["incorrect"] += 1
-
-                    if is_ancestor_strict(dst_label, src_label, parent_of, depth):
+                    vcfpair_relation_counts[pair]["inconsistent_timing"] += 1
+                    if dst_anc_src:
                         reason = "reverse_direction"
                     else:
                         reason = "no_ancestry_relation"
 
+                if not src_anc_dst:
                     inconsistent_timing_rows.append((
-                        chr_bucket, src_chr, src_pos, src_label,
-                        dst_chr, dst_pos, dst_label,
+                        src_chr if src_chr == dst_chr else chr_bucket,
+                        src_pos, src_label,
+                        dst_pos, dst_label,
                         reason,
+                        _edge_category_counts_text(data),
                     ))
 
         else:  # cooccurring
-            agg_by_chr[chr_bucket].cooccur["total"] += 1
-            agg_all.cooccur["total"] += 1
+            if relation == "cooccurring":
+                agg_by_chr[chr_bucket].cooccur["total"] += 1
+                agg_all.cooccur["total"] += 1
 
-            if not known:
-                agg_by_chr[chr_bucket].cooccur["unknown"] += 1
-                agg_all.cooccur["unknown"] += 1
-                continue
+                if not known:
+                    agg_by_chr[chr_bucket].cooccur["unknown"] += 1
+                    agg_all.cooccur["unknown"] += 1
+                    vcfpair_relation_counts[pair]["unknown"] += 1
+                    continue
 
-            # unordered pair key for counts
-            a, b = sorted((src_label, dst_label), key=nlabel_sort_key)
+                # unordered pair key for counts
+                a, b = sorted((src_label, dst_label), key=nlabel_sort_key)
+                vcfpair_relation_counts[pair]["known_total"] += 1
 
-            if src_label == dst_label:
-                agg_by_chr[chr_bucket].cooccur["correct"] += 1
-                agg_all.cooccur["correct"] += 1
-                cooccur_pair_counts[(a, b)]["correct"] += 1
-            else:
-                agg_by_chr[chr_bucket].cooccur["incorrect"] += 1
-                agg_all.cooccur["incorrect"] += 1
-                cooccur_pair_counts[(a, b)]["incorrect"] += 1
-
-                inconsistent_cooccur_rows.append((
-                    chr_bucket, src_chr, src_pos, src_label,
-                    dst_chr, dst_pos, dst_label,
-                ))
+                if src_label == dst_label:
+                    agg_by_chr[chr_bucket].cooccur["correct"] += 1
+                    agg_all.cooccur["correct"] += 1
+                    cooccur_pair_counts[(a, b)]["correct"] += 1
+                    vcfpair_relation_counts[pair]["consistent_cooccurrence"] += 1
+                else:
+                    agg_by_chr[chr_bucket].cooccur["incorrect"] += 1
+                    agg_all.cooccur["incorrect"] += 1
+                    cooccur_pair_counts[(a, b)]["incorrect"] += 1
+                    vcfpair_relation_counts[pair]["inconsistent_cooccurrence"] += 1
+                    inconsistent_cooccur_rows.append((
+                        src_chr if src_chr == dst_chr else chr_bucket,
+                        src_pos, src_label,
+                        dst_pos, dst_label,
+                        _edge_category_counts_text(data),
+                    ))
+            else:  # divergent
+                agg_by_chr[chr_bucket].divergent["total"] += 1
+                agg_all.divergent["total"] += 1
+                if not known:
+                    agg_by_chr[chr_bucket].divergent["unknown"] += 1
+                    agg_all.divergent["unknown"] += 1
+                    vcfpair_relation_counts[pair]["unknown"] += 1
+                    continue
+                src_anc_dst = is_ancestor_strict(src_label, dst_label, parent_of, depth)
+                dst_anc_src = is_ancestor_strict(dst_label, src_label, parent_of, depth)
+                is_divergent_truth = (src_label != dst_label) and (not src_anc_dst) and (not dst_anc_src)
+                vcfpair_relation_counts[pair]["known_total"] += 1
+                a, b = sorted((src_label, dst_label), key=nlabel_sort_key)
+                if is_divergent_truth:
+                    agg_by_chr[chr_bucket].divergent["correct"] += 1
+                    agg_all.divergent["correct"] += 1
+                    divergent_pair_counts[(a, b)]["correct"] += 1
+                    vcfpair_relation_counts[pair]["consistent_divergent"] += 1
+                else:
+                    agg_by_chr[chr_bucket].divergent["incorrect"] += 1
+                    agg_all.divergent["incorrect"] += 1
+                    divergent_pair_counts[(a, b)]["incorrect"] += 1
+                    vcfpair_relation_counts[pair]["inconsistent_divergent"] += 1
+                    if src_label == dst_label:
+                        reason = "same_node"
+                    elif src_anc_dst or dst_anc_src:
+                        reason = "ancestry_relation"
+                    else:
+                        reason = "unknown"
+                    inconsistent_divergent_rows.append((
+                        src_chr if src_chr == dst_chr else chr_bucket,
+                        src_pos, src_label,
+                        dst_pos, dst_label,
+                        reason,
+                        _edge_category_counts_text(data),
+                    ))
 
 
 # ---------------- Output writing ----------------
@@ -375,6 +472,7 @@ def write_summary_tsv(path: Path, agg_by_chr: Dict[str, ChrAgg], agg_all: ChrAgg
         "chrom",
         "timing_total", "timing_correct", "timing_incorrect", "timing_unknown", "timing_pct_consistent",
         "cooccur_total", "cooccur_correct", "cooccur_incorrect", "cooccur_unknown", "cooccur_pct_consistent",
+        "divergent_total", "divergent_correct", "divergent_incorrect", "divergent_unknown", "divergent_pct_consistent",
     ]
     with path.open("w", encoding="utf-8") as f:
         f.write("\t".join(hdr) + "\n")
@@ -387,6 +485,8 @@ def write_summary_tsv(path: Path, agg_by_chr: Dict[str, ChrAgg], agg_all: ChrAgg
                 pct(a.timing["correct"], a.timing["total"], a.timing["unknown"]),
                 str(a.cooccur["total"]), str(a.cooccur["correct"]), str(a.cooccur["incorrect"]), str(a.cooccur["unknown"]),
                 pct(a.cooccur["correct"], a.cooccur["total"], a.cooccur["unknown"]),
+                str(a.divergent["total"]), str(a.divergent["correct"]), str(a.divergent["incorrect"]), str(a.divergent["unknown"]),
+                pct(a.divergent["correct"], a.divergent["total"], a.divergent["unknown"]),
             ]) + "\n")
 
         A = agg_all
@@ -396,20 +496,23 @@ def write_summary_tsv(path: Path, agg_by_chr: Dict[str, ChrAgg], agg_all: ChrAgg
             pct(A.timing["correct"], A.timing["total"], A.timing["unknown"]),
             str(A.cooccur["total"]), str(A.cooccur["correct"]), str(A.cooccur["incorrect"]), str(A.cooccur["unknown"]),
             pct(A.cooccur["correct"], A.cooccur["total"], A.cooccur["unknown"]),
+            str(A.divergent["total"]), str(A.divergent["correct"]), str(A.divergent["incorrect"]), str(A.divergent["unknown"]),
+            pct(A.divergent["correct"], A.divergent["total"], A.divergent["unknown"]),
         ]) + "\n")
 
 
 def write_inconsistent_timing_edges(path: Path, rows: List[Tuple]) -> None:
     hdr = [
-        "chrom_bucket",
-        "src_chrom", "src_pos", "src_tree_node",
-        "dst_chrom", "dst_pos", "dst_tree_node",
+        "chrom",
+        "src_pos", "src_tree_node",
+        "dst_pos", "dst_tree_node",
         "reason",
+        "edge_category_counts",
     ]
     # sort by chromosome then coordinates
     rows_sorted = sorted(
         rows,
-        key=lambda r: (chrom_sort_key(str(r[0])), int(r[2]), int(r[5]), nlabel_sort_key(str(r[3])), nlabel_sort_key(str(r[6]))),
+        key=lambda r: (chrom_sort_key(str(r[0])), int(r[1]), int(r[3]), nlabel_sort_key(str(r[2])), nlabel_sort_key(str(r[4]))),
     )
     with path.open("w", encoding="utf-8") as f:
         f.write("\t".join(hdr) + "\n")
@@ -419,13 +522,32 @@ def write_inconsistent_timing_edges(path: Path, rows: List[Tuple]) -> None:
 
 def write_inconsistent_cooccur_edges(path: Path, rows: List[Tuple]) -> None:
     hdr = [
-        "chrom_bucket",
-        "src_chrom", "src_pos", "src_tree_node",
-        "dst_chrom", "dst_pos", "dst_tree_node",
+        "chrom",
+        "src_pos", "src_tree_node",
+        "dst_pos", "dst_tree_node",
+        "edge_category_counts",
     ]
     rows_sorted = sorted(
         rows,
-        key=lambda r: (chrom_sort_key(str(r[0])), int(r[2]), int(r[5]), nlabel_sort_key(str(r[3])), nlabel_sort_key(str(r[6]))),
+        key=lambda r: (chrom_sort_key(str(r[0])), int(r[1]), int(r[3]), nlabel_sort_key(str(r[2])), nlabel_sort_key(str(r[4]))),
+    )
+    with path.open("w", encoding="utf-8") as f:
+        f.write("\t".join(hdr) + "\n")
+        for r in rows_sorted:
+            f.write("\t".join(map(str, r)) + "\n")
+
+
+def write_inconsistent_divergent_edges(path: Path, rows: List[Tuple]) -> None:
+    hdr = [
+        "chrom",
+        "src_pos", "src_tree_node",
+        "dst_pos", "dst_tree_node",
+        "reason",
+        "edge_category_counts",
+    ]
+    rows_sorted = sorted(
+        rows,
+        key=lambda r: (chrom_sort_key(str(r[0])), int(r[1]), int(r[3]), nlabel_sort_key(str(r[2])), nlabel_sort_key(str(r[4]))),
     )
     with path.open("w", encoding="utf-8") as f:
         f.write("\t".join(hdr) + "\n")
@@ -457,6 +579,54 @@ def write_cooccur_nodepair_counts(path: Path, counts: Dict[Tuple[str, str], Coun
             f.write("\t".join(map(str, r)) + "\n")
 
 
+def write_divergent_nodepair_counts(path: Path, counts: Dict[Tuple[str, str], Counter]) -> None:
+    hdr = ["tree_node_a", "tree_node_b", "consistent", "inconsistent"]
+    rows = []
+    for (a, b), c in counts.items():
+        rows.append((a, b, int(c["correct"]), int(c["incorrect"])))
+    rows_sorted = sorted(rows, key=lambda r: (nlabel_sort_key(r[0]), nlabel_sort_key(r[1])))
+    with path.open("w", encoding="utf-8") as f:
+        f.write("\t".join(hdr) + "\n")
+        for r in rows_sorted:
+            f.write("\t".join(map(str, r)) + "\n")
+
+
+def write_vcfpair_relation_counts(path: Path, counts: Dict[Tuple[str, str], Counter]) -> None:
+    hdr = [
+        "vcf_label_a",
+        "vcf_label_b",
+        "known_total",
+        "unknown",
+        "consistent_timing",
+        "consistent_cooccurrence",
+        "consistent_divergent",
+        "inconsistent_timing",
+        "inconsistent_cooccurrence",
+        "inconsistent_divergent",
+    ]
+    rows = []
+    for (a, b), c in counts.items():
+        rows.append(
+            (
+                a,
+                b,
+                int(c["known_total"]),
+                int(c["unknown"]),
+                int(c["consistent_timing"]),
+                int(c["consistent_cooccurrence"]),
+                int(c["consistent_divergent"]),
+                int(c["inconsistent_timing"]),
+                int(c["inconsistent_cooccurrence"]),
+                int(c["inconsistent_divergent"]),
+            )
+        )
+    rows_sorted = sorted(rows, key=lambda r: (nlabel_sort_key(r[0]), nlabel_sort_key(r[1])))
+    with path.open("w", encoding="utf-8") as f:
+        f.write("\t".join(hdr) + "\n")
+        for r in rows_sorted:
+            f.write("\t".join(map(str, r)) + "\n")
+
+
 # ---------------- Main ----------------
 
 def main() -> None:
@@ -472,10 +642,13 @@ def main() -> None:
 
     inconsistent_timing_rows: List[Tuple] = []
     inconsistent_cooccur_rows: List[Tuple] = []
+    inconsistent_divergent_rows: List[Tuple] = []
 
     # genome-wide nodepair counts (known edges only)
     timing_pair_counts: Dict[Tuple[str, str], Counter] = defaultdict(Counter)   # (src, dst)
     cooccur_pair_counts: Dict[Tuple[str, str], Counter] = defaultdict(Counter) # (a, b) unordered
+    divergent_pair_counts: Dict[Tuple[str, str], Counter] = defaultdict(Counter) # (a, b) unordered
+    vcfpair_relation_counts: Dict[Tuple[str, str], Counter] = defaultdict(Counter)
 
     out_folders = [p for p in outdir.iterdir() if p.is_dir() and p.name.endswith("_out")]
     if not out_folders:
@@ -501,8 +674,11 @@ def main() -> None:
                     agg_all=agg_all,
                     inconsistent_timing_rows=inconsistent_timing_rows,
                     inconsistent_cooccur_rows=inconsistent_cooccur_rows,
+                    inconsistent_divergent_rows=inconsistent_divergent_rows,
                     timing_pair_counts=timing_pair_counts,
                     cooccur_pair_counts=cooccur_pair_counts,
+                    divergent_pair_counts=divergent_pair_counts,
+                    vcfpair_relation_counts=vcfpair_relation_counts,
                 )
             except json.JSONDecodeError as e:
                 raise SystemExit(f"JSON parse error in {jp}: {e}") from e
@@ -514,21 +690,30 @@ def main() -> None:
     summary_path = outdir / f"{prefix}_summary.tsv"
     incons_timing_path = outdir / f"{prefix}_inconsistent_timing_edges.tsv"
     incons_cooccur_path = outdir / f"{prefix}_inconsistent_cooccur_edges.tsv"
+    incons_divergent_path = outdir / f"{prefix}_inconsistent_divergent_edges.tsv"
     timing_nodepair_path = outdir / f"{prefix}_timing_nodepair_counts.tsv"
     cooccur_nodepair_path = outdir / f"{prefix}_cooccur_nodepair_counts.tsv"
+    divergent_nodepair_path = outdir / f"{prefix}_divergent_nodepair_counts.tsv"
+    vcfpair_relation_counts_path = outdir / f"{prefix}_vcfpair_relation_counts.tsv"
 
     write_summary_tsv(summary_path, agg_by_chr, agg_all)
     write_inconsistent_timing_edges(incons_timing_path, inconsistent_timing_rows)
     write_inconsistent_cooccur_edges(incons_cooccur_path, inconsistent_cooccur_rows)
+    write_inconsistent_divergent_edges(incons_divergent_path, inconsistent_divergent_rows)
     write_timing_nodepair_counts(timing_nodepair_path, timing_pair_counts)
     write_cooccur_nodepair_counts(cooccur_nodepair_path, cooccur_pair_counts)
+    write_divergent_nodepair_counts(divergent_nodepair_path, divergent_pair_counts)
+    write_vcfpair_relation_counts(vcfpair_relation_counts_path, vcfpair_relation_counts)
 
     print("Wrote:")
     print(f"  {summary_path}")
     print(f"  {incons_timing_path}")
     print(f"  {incons_cooccur_path}")
+    print(f"  {incons_divergent_path}")
     print(f"  {timing_nodepair_path}")
     print(f"  {cooccur_nodepair_path}")
+    print(f"  {divergent_nodepair_path}")
+    print(f"  {vcfpair_relation_counts_path}")
 
 
 if __name__ == "__main__":

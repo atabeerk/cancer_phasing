@@ -48,7 +48,9 @@ def export_cytoscape_json(
     # Nodes: positions + VAF
     nodes_json = []
     for pos in sorted(builder.nodes):
-        data = {"id": str(pos), "position": pos}
+        # Keep position as string for visualization tools (e.g., Cytoscape)
+        # to avoid scientific-notation formatting of large genomic coordinates.
+        data = {"id": str(pos), "position": str(pos)}
         chrom = builder.node_chrom.get(pos)
         if chrom is not None:
             data["chrom"] = chrom
@@ -132,6 +134,15 @@ def export_condensed_cytoscape_json(
             "read_counts": "x/y/z/t",      # summed ALT_ALT/ALT_REF/REF_ALT/REF_REF
             "label": "x/y/z/t | rel=R | n=N",
             "support_edge_count": <int>,   # how many SNV–SNV edges collapsed into this
+            "support_edge_details": [      # per supporting uncondensed edge
+              {
+                "source": "<uncondensed_u>",
+                "target": "<uncondensed_v>",
+                "read_counts": "x/y/z/t",
+                "reliability": <float>
+              },
+              ...
+            ],
           }
         }
     """
@@ -168,8 +179,10 @@ def export_condensed_cytoscape_json(
 
         data = {
             "id": str(rep),
-            "cluster_id": rep,
-            "members": members,
+            # Store large integer-like fields as strings to prevent scientific
+            # notation in downstream graph viewers.
+            "cluster_id": str(rep),
+            "members": [str(m) for m in members],
             "cluster_size": len(members),
         }
 
@@ -179,7 +192,7 @@ def export_condensed_cytoscape_json(
             data["chrom"] = chrom
 
         # Use the smallest position as a representative "position" for layout
-        data["position"] = members[0]
+        data["position"] = str(members[0])
         if mean_vaf is not None:
             data["vaf"] = mean_vaf
 
@@ -227,6 +240,16 @@ def export_condensed_cytoscape_json(
             key = (rep_u, rep_v, "divergent", e.loss)
             directed = False
 
+        read_counts_str = f"{e.alt_alt}/{e.alt_ref}/{e.ref_alt}/{e.ref_ref}"
+        source_id = str(e.u)
+        target_id = str(e.v)
+        support_detail = {
+            "source": source_id,
+            "target": target_id,
+            "read_counts": read_counts_str,
+            "reliability": e.reliability,
+        }
+
         if key not in agg_edges:
             agg_edges[key] = {
                 "u": rep_u,
@@ -240,6 +263,7 @@ def export_condensed_cytoscape_json(
                 "ref_ref": e.ref_ref,
                 "reliability": e.reliability,   # start with this edge's reliability
                 "support_edge_count": 1,
+                "support_edge_details": [support_detail],
             }
         else:
             rec = agg_edges[key]
@@ -248,6 +272,7 @@ def export_condensed_cytoscape_json(
             rec["ref_alt"] += e.ref_alt
             rec["ref_ref"] += e.ref_ref
             rec["support_edge_count"] += 1
+            rec["support_edge_details"].append(support_detail)
             if e.reliability > rec["reliability"]:
                 rec["reliability"] = e.reliability
 
@@ -273,6 +298,7 @@ def export_condensed_cytoscape_json(
                 "read_counts": read_counts_str,
                 "label": label_str,
                 "support_edge_count": rec["support_edge_count"],
+                "support_edge_details": rec["support_edge_details"],
             }
         })
 

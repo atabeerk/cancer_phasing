@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-Run postprocessing steps on the main program output: annotate (if --vcfs),
-report_condensed_timing_chains (always), evaluate (if --tree), then
-summarize_and_compress and phase-block plotting (always). Only runs
-annotate/evaluate when their required inputs are provided.
+Run postprocessing steps on main output:
+  1) annotate_source_vcf (optional; if --vcfs and/or --cn-bed-hp1/--cn-bed-hp2)
+  2) report_condensed_timing_chains (always)
+  3) evaluate_graphs (optional; if --tree)
+  4) plot_edge_eval_vcfpair_heatmap (optional; if --vcfs and --tree)
+  5) summarize_and_compress (always)
+  6) plot_timing_cn_interactive (always; CN overlays optional)
+  7) plot_max_phase_block_by_chr (always)
 """
+
+from __future__ import annotations
 
 import argparse
 import subprocess
@@ -12,77 +18,87 @@ import sys
 from pathlib import Path
 
 
-def main():
+_SUMMARY_PREFIXES = (
+    "Total ",
+    "Rank distribution",
+    "Wrote ",
+)
+
+
+def _extract_summary(text: str) -> str:
+    """
+    Return only summary lines plus indented detail lines that follow a summary
+    header (e.g. per-rank counts under "Rank distribution ...").
+    """
+    out: list[str] = []
+    in_block = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            in_block = False
+            continue
+        if any(stripped.startswith(p) for p in _SUMMARY_PREFIXES):
+            out.append(stripped)
+            in_block = True
+        elif in_block and line.startswith("  "):
+            out.append(stripped)
+        else:
+            in_block = False
+    return "\n".join(out)
+
+
+def _tail_lines(text: str, n: int = 25) -> str:
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    if len(lines) <= n:
+        return "\n".join(lines)
+    return "\n".join(lines[-n:])
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run postprocessing on main output: annotate (optional), report_condensed_timing_chains, evaluate (optional), then summarize_and_compress and plot_max_phase_block_by_chr (always)."
+        description=(
+            "Run postprocessing on main output: annotate (optional), "
+            "report_condensed_timing_chains, evaluate (optional), then "
+            "summarize_and_compress and plotting."
+        )
     )
-    parser.add_argument(
-        "--outdir",
-        required=True,
-        type=Path,
-        help="Main output directory (used by all steps that run).",
-    )
-    parser.add_argument(
-        "--vcfs",
-        type=Path,
-        default=None,
-        help="Directory containing VCF/VCF.GZ files; if provided, run annotate_source_vcf.",
-    )
-    parser.add_argument(
-        "--cn-bed-hp1",
-        type=Path,
-        default=None,
-        help="Copy-number BED segments file for haplotype 1.",
-    )
-    parser.add_argument(
-        "--cn-bed-hp2",
-        type=Path,
-        default=None,
-        help="Copy-number BED segments file for haplotype 2.",
-    )
-    parser.add_argument(
-        "--tree",
-        type=Path,
-        default=None,
-        help="Tree file (parent<TAB>child); if provided, run evaluate_graphs.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print commands that would be run without executing them.",
-    )
+    parser.add_argument("--outdir", required=True, type=Path, help="Main output directory.")
+    parser.add_argument("--vcfs", type=Path, default=None, help="VCF directory for source annotation.")
+    parser.add_argument("--cn-bed-hp1", type=Path, default=None, help="HP1 copy-number BED.")
+    parser.add_argument("--cn-bed-hp2", type=Path, default=None, help="HP2 copy-number BED.")
+    parser.add_argument("--tree", type=Path, default=None, help="Parent-child TSV for evaluation.")
+    parser.add_argument("--dry-run", action="store_true", help="Print commands and exit.")
     args = parser.parse_args()
+
+    if (args.cn_bed_hp1 is None) != (args.cn_bed_hp2 is None):
+        parser.error("Provide both --cn-bed-hp1 and --cn-bed-hp2 together.")
 
     postprocess_dir = Path(__file__).resolve().parent
     evo_dir = postprocess_dir.parent
     annotate_script = postprocess_dir / "annotate_source_vcf.py"
-    timing_chains_script = postprocess_dir / "report_condensed_timing_chains.py"
+    timing_script = postprocess_dir / "report_condensed_timing_chains.py"
     evaluate_script = postprocess_dir / "evaluate_graphs.py"
+    eval_heatmap_script = postprocess_dir / "plot_edge_eval_vcfpair_heatmap.py"
     summarize_script = evo_dir / "summarize_and_compress.py"
-    plot_script = postprocess_dir / "plot_max_phase_block_by_chr.py"
+    max_span_plot_script = postprocess_dir / "plot_max_phase_block_by_chr.py"
+    interactive_plot_script = postprocess_dir / "plot_timing_cn_interactive.py"
 
     outdir = args.outdir.resolve()
-
-    steps = []
-    if (args.cn_bed_hp1 is None) != (args.cn_bed_hp2 is None):
-        parser.error("Provide both --cn-bed-hp1 and --cn-bed-hp2 together.")
+    steps: list[tuple[str, list[str]]] = []
 
     if args.vcfs is not None or args.cn_bed_hp1 is not None:
-        annotate_cmd = [sys.executable, str(annotate_script), "--main_out", str(outdir)]
+        cmd = [sys.executable, str(annotate_script), "--main_out", str(outdir)]
         if args.vcfs is not None:
-            annotate_cmd.extend(["--vcfs", str(args.vcfs.resolve())])
+            cmd.extend(["--vcfs", str(args.vcfs.resolve())])
         if args.cn_bed_hp1 is not None and args.cn_bed_hp2 is not None:
-            annotate_cmd.extend(["--cn-bed-hp1", str(args.cn_bed_hp1.resolve())])
-            annotate_cmd.extend(["--cn-bed-hp2", str(args.cn_bed_hp2.resolve())])
-        steps.append(
-            (
-                "annotate_source_vcf",
-                annotate_cmd,
-            )
-        )
-    steps.append(
-        ("report_condensed_timing_chains", [sys.executable, str(timing_chains_script), "--outdir", str(outdir)]),
-    )
+            cmd.extend(["--cn-bed-hp1", str(args.cn_bed_hp1.resolve())])
+            cmd.extend(["--cn-bed-hp2", str(args.cn_bed_hp2.resolve())])
+        steps.append(("annotate_source_vcf", cmd))
+
+    steps.append(("report_condensed_timing_chains", [sys.executable, str(timing_script), "--outdir", str(outdir)]))
+
     if args.tree is not None:
         steps.append(
             (
@@ -90,37 +106,68 @@ def main():
                 [sys.executable, str(evaluate_script), "--outdir", str(outdir), "--tree", str(args.tree.resolve())],
             )
         )
-    steps.append(
-        ("summarize_and_compress", [sys.executable, str(summarize_script), str(outdir)])
-    )
+    if args.tree is not None and args.vcfs is not None:
+        steps.append(
+            (
+                "plot_edge_eval_vcfpair_heatmap",
+                [
+                    sys.executable,
+                    str(eval_heatmap_script),
+                    "--outdir",
+                    str(outdir),
+                    "--tree",
+                    str(args.tree.resolve()),
+                ],
+            )
+        )
+
+    steps.append(("summarize_and_compress", [sys.executable, str(summarize_script), str(outdir)]))
+
+    interactive_cmd = [sys.executable, str(interactive_plot_script), "--outdir", str(outdir)]
+    if args.cn_bed_hp1 is not None and args.cn_bed_hp2 is not None:
+        interactive_cmd.extend(["--cn-bed-hp1", str(args.cn_bed_hp1.resolve())])
+        interactive_cmd.extend(["--cn-bed-hp2", str(args.cn_bed_hp2.resolve())])
+    steps.append(("plot_timing_cn_interactive", interactive_cmd))
+
     steps.append(
         (
             "plot_max_phase_block_by_chr",
-            [
-                sys.executable,
-                str(plot_script),
-                str(outdir / "global_summary.txt"),
-            ],
+            [sys.executable, str(max_span_plot_script), str(outdir / "global_summary.txt")],
         )
     )
 
+    succeeded = 0
     for i, (name, argv) in enumerate(steps, start=1):
         print(f"Running ({i}/{len(steps)}): {name}")
         if args.dry_run:
-            print("  ", " ".join(argv))
+            print(" ", " ".join(argv))
             continue
-        result = subprocess.run(argv)
+
+        result = subprocess.run(argv, capture_output=True, text=True)
         if result.returncode != 0:
             print(f"Error: {name} exited with code {result.returncode}", file=sys.stderr)
+            err_tail = _tail_lines(result.stderr or "")
+            out_tail = _tail_lines(result.stdout or "")
+            if err_tail:
+                print("--- stderr (tail) ---", file=sys.stderr)
+                print(err_tail, file=sys.stderr)
+            elif out_tail:
+                print("--- stdout (tail) ---", file=sys.stderr)
+                print(out_tail, file=sys.stderr)
             sys.exit(result.returncode)
+
+        summary = _extract_summary(result.stdout or "")
+        if summary:
+            print(summary)
+        succeeded += 1
+        print(f"Completed: {name}")
 
     if args.dry_run:
         print("(dry-run; no commands executed)")
     else:
-        print("Done.")
+        print(f"Done. Completed {succeeded}/{len(steps)} steps successfully.")
 
 
-# tree /data/KolmogorovLab/donmeza2/cancer_phasing_data/mouse/tree.tsv
-# example command: python postprocess/run_postprocessing.py --outdir /data/KolmogorovLab/donmeza2/cancer_phasing_data/mouse/output --vcfs /data/KolmogorovLab/donmeza2/cancer_phasing_data/mouse/vcfs --tree /data/KolmogorovLab/donmeza2/cancer_phasing_data/mouse/tree.tsv
 if __name__ == "__main__":
     main()
+

@@ -22,8 +22,9 @@ struct PositionInfo {
    std::unordered_map<std::string, int> readHP; // read name -> HP tag (1/2)
 };
 
-// Parse VCF (supports .vcf and .vcf.gz via htslib)
-std::vector<SNV> readVCF(const std::string& vcfFile);
+// Parse VCF (supports .vcf and .vcf.gz via htslib).
+// If vcfSampleName is provided, VAF is computed from FORMAT/AD for that sample.
+std::vector<SNV> readVCF(const std::string& vcfFile, const std::string& vcfSampleName = "");
 
 // Parse mpileup file and attach read HP tags from BAM for the same region.
 std::unordered_map<std::string, PositionInfo> readMpileup(
