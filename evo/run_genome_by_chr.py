@@ -91,55 +91,6 @@ def get_chromosomes_from_bam(bam_path):
     return chromosomes
 
 
-def cigar_ref_span(cigar):
-    """Return aligned reference span from CIGAR (M/D/N/=/X consume reference)."""
-    if not cigar or cigar == "*":
-        return 0
-    total = 0
-    for length_str, op in re.findall(r"(\d+)([MIDNSHP=X])", cigar):
-        if op in {"M", "D", "N", "=", "X"}:
-            total += int(length_str)
-    return total
-
-
-def get_max_aligned_ref_span_by_chrom_from_bam(bam_path, target_chroms=None):
-    """
-    Stream BAM alignments once and return:
-      - max aligned reference span per chromosome (dict),
-      - global max aligned reference span,
-      - elapsed seconds.
-    """
-    t0 = time.monotonic()
-    cmd = ["samtools", "view", bam_path]
-    max_span_by_chrom = {}
-    global_max_span = 0
-    target_set = set(target_chroms) if target_chroms is not None else None
-    try:
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True) as proc:
-            if proc.stdout is None:
-                return {}, 0, (time.monotonic() - t0)
-            for line in proc.stdout:
-                fields = line.rstrip("\n").split("\t")
-                if len(fields) < 6:
-                    continue
-                chrom = fields[2]
-                if target_set is not None and chrom not in target_set:
-                    continue
-                span = cigar_ref_span(fields[5])
-                if span <= 0:
-                    continue
-                if span > max_span_by_chrom.get(chrom, 0):
-                    max_span_by_chrom[chrom] = span
-                if span > global_max_span:
-                    global_max_span = span
-            ret = proc.wait()
-            if ret != 0:
-                return {}, 0, (time.monotonic() - t0)
-    except Exception:
-        return {}, 0, (time.monotonic() - t0)
-    return max_span_by_chrom, global_max_span, (time.monotonic() - t0)
-
-
 def merged_interval_coverage_bp(intervals):
     """Return covered bp after merging inclusive [start, end] intervals."""
     if not intervals:
@@ -206,6 +157,30 @@ def read_mutation_stats_tsv(tsv_path):
     return stats
 
 
+def extract_max_span_scan_from_chrom_log(chrom_log_path):
+    """
+    Parse a '[max_span_scan]' line written by ./main from a chromosome log.
+    Returns a dict of parsed key/value fields plus the raw line.
+    """
+    if not os.path.exists(chrom_log_path):
+        return {}
+    last_line = ""
+    with open(chrom_log_path, "r") as f:
+        for line in f:
+            if line.startswith("[max_span_scan]"):
+                last_line = line.strip()
+    if not last_line:
+        return {}
+
+    out = {"raw": last_line}
+    for tok in last_line.split():
+        if "=" not in tok:
+            continue
+        k, v = tok.split("=", 1)
+        out[k] = v
+    return out
+
+
 def process_chromosome(
     chrom,
     length,
@@ -215,8 +190,6 @@ def process_chromosome(
     log_dir,
     main_program,
     vcf_sample_name,
-    selected_max_pair_distance_kb,
-    chrom_max_aligned_ref_span_bp,
     tool_threads,
     force_single_thread_tools,
 ):
@@ -244,9 +217,6 @@ def process_chromosome(
         chrom_log.write(f"Main output directory: {out_dir}\n")
         chrom_log.write(f"tool_threads_per_subprocess={tool_threads}\n")
         chrom_log.write(f"force_single_thread_tools={int(force_single_thread_tools)}\n")
-        chrom_log.write(f"max_aligned_ref_span_bp={chrom_max_aligned_ref_span_bp}\n")
-        chrom_log.write(f"selected_max_pair_distance_kb={selected_max_pair_distance_kb}\n")
-        chrom_log.write(f"selected_max_pair_distance_bp={selected_max_pair_distance_kb * 1000}\n")
         chrom_log.flush()
 
         # --- Step 1: Split BAM for this chromosome with filters ---
@@ -278,7 +248,6 @@ def process_chromosome(
             "--vcf", chrom_vcf,
             "--bam", chrom_bam,
             "--output-dir", out_dir,
-            "--max-pair-distance-kb", str(selected_max_pair_distance_kb),
         ]
         if vcf_sample_name:
             main_cmd.extend(["--vcf-sample-name", vcf_sample_name])
@@ -346,37 +315,6 @@ def main():
     print("Extracting chromosome list from BAM header using samtools...")
     chromosomes = get_chromosomes_from_bam(bam_path)
     print(f"Detected {len(chromosomes)} chromosomes.")
-    chrom_order = [chrom for chrom, _ in chromosomes]
-
-    print("Estimating max aligned reference span per chromosome from full BAM (once)...")
-    (
-        max_aligned_ref_span_by_chrom_bp,
-        global_max_aligned_ref_span_bp,
-        max_span_scan_seconds,
-    ) = get_max_aligned_ref_span_by_chrom_from_bam(bam_path, target_chroms=chrom_order)
-    fallback_max_pair_distance_bp = (
-        ((global_max_aligned_ref_span_bp + 999) // 1000) * 1000
-        if global_max_aligned_ref_span_bp > 0
-        else 200000
-    )
-    if global_max_aligned_ref_span_bp <= 0:
-        print(
-            "Warning: could not determine any aligned reference span from BAM; "
-            f"falling back to {fallback_max_pair_distance_bp} bp."
-        )
-
-    selected_max_pair_distance_kb_by_chrom = {}
-    selected_max_pair_distance_bp_by_chrom = {}
-    for chrom, _ in chromosomes:
-        chrom_max_span_bp = max_aligned_ref_span_by_chrom_bp.get(chrom, 0)
-        selected_bp = (
-            ((chrom_max_span_bp + 999) // 1000) * 1000
-            if chrom_max_span_bp > 0
-            else fallback_max_pair_distance_bp
-        )
-        selected_max_pair_distance_bp_by_chrom[chrom] = selected_bp
-        selected_max_pair_distance_kb_by_chrom[chrom] = selected_bp // 1000
-
     genome_bp = sum(length for _, length in chromosomes)
     total_component_bp_summed = 0
     total_component_bp_unique = 0
@@ -411,23 +349,15 @@ def main():
             run_log.write(f"VCF sample name: {vcf_sample_name}\n")
         run_log.write("\n=== Default/auto-selected parameters ===\n")
         run_log.write(f"main_default_min_reads=2\n")
-        run_log.write(f"global_max_aligned_ref_span_bp={global_max_aligned_ref_span_bp}\n")
-        run_log.write(f"max_aligned_ref_span_scan_seconds={max_span_scan_seconds:.3f}\n")
-        run_log.write(f"fallback_max_pair_distance_bp={fallback_max_pair_distance_bp}\n")
-        run_log.write("max_pair_distance_source=wrapper_precomputed_once_from_full_bam_per_chrom\n")
+        run_log.write("max_pair_distance_source=computed_by_main_per_chrom_bam\n")
         run_log.write(f"jobs={jobs}\n")
         run_log.write(f"tool_threads_per_subprocess={tool_threads}\n")
         run_log.write("parallel_mode=chromosome_thread_pool\n")
         run_log.write(f"Detected chromosomes: {len(chromosomes)}\n")
         run_log.write(f"Genome bp (selected chromosomes): {genome_bp}\n")
-        run_log.write("\n=== Per-chromosome max aligned span and selected max pair distance ===\n")
-        for chrom, _ in chromosomes:
-            run_log.write(
-                f"{chrom}\t"
-                f"max_aligned_ref_span_bp={max_aligned_ref_span_by_chrom_bp.get(chrom, 0)}\t"
-                f"selected_max_pair_distance_bp={selected_max_pair_distance_bp_by_chrom[chrom]}\t"
-                f"selected_max_pair_distance_kb={selected_max_pair_distance_kb_by_chrom[chrom]}\n"
-            )
+        run_log.write(
+            "per_chrom_max_span_summary_source=parsed_from_chrom_log_[max_span_scan]_line\n"
+        )
         run_log.flush()
 
         chrom_tasks = sorted(chromosomes, key=lambda x: x[1], reverse=True)
@@ -442,8 +372,6 @@ def main():
                     log_dir=log_dir,
                     main_program=main_program,
                     vcf_sample_name=vcf_sample_name,
-                    selected_max_pair_distance_kb=selected_max_pair_distance_kb_by_chrom[chrom],
-                    chrom_max_aligned_ref_span_bp=max_aligned_ref_span_by_chrom_bp.get(chrom, 0),
                     tool_threads=tool_threads,
                     force_single_thread_tools=force_single_thread_tools,
                 )
@@ -462,6 +390,11 @@ def main():
                     f"chrom_pct_summed={result['chrom_pct_summed']:.6f}\t"
                     f"chrom_pct_unique={result['chrom_pct_unique']:.6f}\n"
                 )
+                max_span = extract_max_span_scan_from_chrom_log(result["chrom_log_path"])
+                if max_span:
+                    run_log.write(f"{result['chrom']}\t{max_span['raw']}\n")
+                else:
+                    run_log.write(f"{result['chrom']}\tmax_span_scan=not_found_in_chrom_log\n")
                 run_log.flush()
         else:
             with ThreadPoolExecutor(max_workers=jobs) as executor:
@@ -476,8 +409,6 @@ def main():
                         log_dir,
                         main_program,
                         vcf_sample_name,
-                        selected_max_pair_distance_kb_by_chrom[chrom],
-                        max_aligned_ref_span_by_chrom_bp.get(chrom, 0),
                         tool_threads,
                         force_single_thread_tools,
                     ): (chrom, length)
@@ -501,6 +432,11 @@ def main():
                             f"chrom_pct_summed={result['chrom_pct_summed']:.6f}\t"
                             f"chrom_pct_unique={result['chrom_pct_unique']:.6f}\n"
                         )
+                        max_span = extract_max_span_scan_from_chrom_log(result["chrom_log_path"])
+                        if max_span:
+                            run_log.write(f"{result['chrom']}\t{max_span['raw']}\n")
+                        else:
+                            run_log.write(f"{result['chrom']}\tmax_span_scan=not_found_in_chrom_log\n")
                         run_log.flush()
                 except Exception as exc:
                     for f in futures:
