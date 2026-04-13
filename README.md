@@ -54,7 +54,7 @@ Dependency checks will be run by the program and fail early at startup before pr
 
 ## Quickstart Usage
 
-* ###  Run chromosome-parallel wrapper (Recommended)
+### 1) Run chromosome-parallel wrapper (Recommended)
 
 This wrapper does the required preprocessing, runs the main program with each chromosome in parallel (set `--jobs 1` for serial) and applies available postprocessing. 
 
@@ -66,7 +66,7 @@ python run_genome_by_chr.py \
   --jobs 4
 ```
 
-* ### Alternatively, run `evo/main` directly (not recommended)
+### 2) Run `evo/main` directly (not recommended)
 
 ```bash
 ./main \
