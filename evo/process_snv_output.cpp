@@ -25,6 +25,8 @@ struct SNPEntry {
     float vaf2 = 0.5f;
     string hap1 = "UNKNOWN";
     string hap2 = "UNKNOWN";
+    string hp_reads1 = "0/0";
+    string hp_reads2 = "0/0";
 };
 
 SNPEntry parseLine(const string& line) {
@@ -50,6 +52,10 @@ SNPEntry parseLine(const string& line) {
             e.hap1 = val_str;
         } else if (key == "HAP2") {
             e.hap2 = val_str;
+        } else if (key == "HP_READS1") {
+            e.hp_reads1 = val_str;
+        } else if (key == "HP_READS2") {
+            e.hp_reads2 = val_str;
         } else if (key == "ALT_ALT") {
             e.ALT_ALT = stoi(val_str);
         } else if (key == "ALT_REF") {
@@ -488,6 +494,8 @@ void processFile(const string& filename, int minReads) {
             "VAF2=" + to_string(e.vaf2) + " "
             "HAP1=" + e.hap1 + " "
             "HAP2=" + e.hap2 + " "
+            "HP_READS1=" + e.hp_reads1 + " "
+            "HP_READS2=" + e.hp_reads2 + " "
             "ALT_ALT=" + to_string(e.ALT_ALT) + " "
             "ALT_REF=" + to_string(e.ALT_REF) + " "
             "REF_ALT=" + to_string(e.REF_ALT) + " "

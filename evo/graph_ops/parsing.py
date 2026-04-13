@@ -55,6 +55,39 @@ def parse_haplotype_tags(kv: Dict[str, str]) -> Tuple[Optional[str], Optional[st
     return _normalize_haplotype_tag(hap1_raw), _normalize_haplotype_tag(hap2_raw)
 
 
+def _normalize_hp_reads(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    su = s.upper()
+    if su in {"UNK", "UNKNOWN", "NA", "."}:
+        return "UNKNOWN"
+    if "/" in s:
+        a, b = s.split("/", 1)
+        try:
+            ai = int(a)
+            bi = int(b)
+            if ai >= 0 and bi >= 0:
+                return f"{ai}/{bi}"
+        except ValueError:
+            pass
+    return s
+
+
+def parse_hp_reads(kv: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
+    hp1_raw = _first_present(
+        kv,
+        ["HP_READS1", "SNP1_HP_READS", "HPREADS1", "SNP1_HPREADS"],
+    )
+    hp2_raw = _first_present(
+        kv,
+        ["HP_READS2", "SNP2_HP_READS", "HPREADS2", "SNP2_HPREADS"],
+    )
+    return _normalize_hp_reads(hp1_raw), _normalize_hp_reads(hp2_raw)
+
+
 def parse_snv_line(line: str) -> Tuple[str, int, int, Dict[str, str]]:
     """
     Parse a line like:
@@ -144,6 +177,7 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                 best_score = float(kv.get("BEST_SCORE", "0.0"))
                 margin = float(kv.get("MARGIN", "0.0"))
                 hap1, hap2 = parse_haplotype_tags(kv)
+                hp_reads1, hp_reads2 = parse_hp_reads(kv)
 
                 # For timing relations, orient u->v using snp1_before_snp2 vs snp2_before_snp1
                 if relation == "timing":
@@ -151,11 +185,13 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                         u, v = pos1, pos2
                         vaf_u, vaf_v = vaf1, vaf2
                         hap_u, hap_v = hap1, hap2
+                        hp_reads_u, hp_reads_v = hp_reads1, hp_reads2
                     elif orientation == "2_before_1":
                         u, v = pos2, pos1
                         vaf_u, vaf_v = vaf2, vaf1
                         alt_ref, ref_alt = ref_alt, alt_ref
                         hap_u, hap_v = hap2, hap1
+                        hp_reads_u, hp_reads_v = hp_reads2, hp_reads1
                     else:
                         raise ValueError(f"Unexpected timing orientation: {orientation}")
                 else:
@@ -163,6 +199,7 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                     u, v = pos1, pos2
                     vaf_u, vaf_v = vaf1, vaf2
                     hap_u, hap_v = hap1, hap2
+                    hp_reads_u, hp_reads_v = hp_reads1, hp_reads2
 
                 edges.append(
                     Edge(
@@ -183,6 +220,8 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                         source_file=path,
                         hap_u=hap_u,
                         hap_v=hap_v,
+                        hp_reads_u=hp_reads_u,
+                        hp_reads_v=hp_reads_v,
                     )
                 )
 
@@ -213,6 +252,11 @@ def find_chunk_bases(chunk_dir: str) -> List[str]:
 
     bases: List[str] = []
     for fname in os.listdir(chunk_dir):
+        # Only process canonical chunk comparison files produced by the C++ pipeline.
+        # This intentionally excludes sidecar files (e.g. macOS ._ AppleDouble files)
+        # and any other .txt artifacts that do not start with the required prefix.
+        if not fname.startswith("chunk_"):
+            continue
         if not fname.endswith(".txt"):
             continue
         full = os.path.join(chunk_dir, fname)
@@ -220,7 +264,7 @@ def find_chunk_bases(chunk_dir: str) -> List[str]:
         if any(fname.endswith(suf) for suf in relation_suffixes):
             continue
 
-        # This should be the original chunk comparison file; strip '.txt' to get base
+        # This should be the original chunk comparison file; strip '.txt' to get base.
         base = full[: -len(".txt")]
         bases.append(base)
 

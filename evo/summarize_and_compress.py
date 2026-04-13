@@ -14,13 +14,8 @@ def summarize_component_stats(stats_file):
             "avg_span_bp": "0.0",
             "median_span_bp": "0.0",
             "top10_max_span_bp": "",
-            "avg_haplotypes": "0.0",
-            "median_haplotypes": "0.0",
-            "top10_max_haplotypes": "",
             "avg_num_nodes": "0.0",
             "top10_max_num_nodes": "",
-            "median_multi_node_haplotypes": "0.0",
-            "top10_max_multi_node_haplotypes": "",
             "num_components": 0,
         }
 
@@ -30,28 +25,20 @@ def summarize_component_stats(stats_file):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Drop rows where the key numeric values are missing
-    df = df.dropna(subset=["span_bp", "haplotypes", "num_nodes"])
+    # Drop rows where key numeric values are missing.
+    required_cols = [c for c in ["span_bp", "num_nodes"] if c in df.columns]
+    if required_cols:
+        df = df.dropna(subset=required_cols)
     if df.empty:
         print(f"Warning: {stats_file} has no valid numeric rows — skipping.")
         return {
             "avg_span_bp": "0.0",
             "median_span_bp": "0.0",
             "top10_max_span_bp": "",
-            "avg_haplotypes": "0.0",
-            "median_haplotypes": "0.0",
-            "top10_max_haplotypes": "",
             "avg_num_nodes": "0.0",
             "top10_max_num_nodes": "",
-            "median_multi_node_haplotypes": "0.0",
-            "top10_max_multi_node_haplotypes": "",
             "num_components": 0,
         }
-
-    # Ensure multi_node_haplotypes exists and has no NaN
-    if "multi_node_haplotypes" not in df.columns:
-        df["multi_node_haplotypes"] = 0
-    df["multi_node_haplotypes"] = df["multi_node_haplotypes"].fillna(0)
 
     # --- Compute statistics ---
     stats = {
@@ -59,17 +46,8 @@ def summarize_component_stats(stats_file):
         "median_span_bp": df["span_bp"].median(),
         "top10_max_span_bp": ",".join(map(str, df["span_bp"].nlargest(10).tolist())),
 
-        "avg_haplotypes": df["haplotypes"].mean(),
-        "median_haplotypes": df["haplotypes"].median(),
-        "top10_max_haplotypes": ",".join(map(str, df["haplotypes"].nlargest(10).tolist())),
-
         "avg_num_nodes": df["num_nodes"].mean(),
         "top10_max_num_nodes": ",".join(map(str, df["num_nodes"].nlargest(10).tolist())),
-
-        "median_multi_node_haplotypes": df["multi_node_haplotypes"].median(),
-        "top10_max_multi_node_haplotypes": ",".join(
-            map(str, df["multi_node_haplotypes"].nlargest(10).tolist())
-        ),
 
         "num_components": len(df),
     }
@@ -80,8 +58,6 @@ def summarize_component_stats(stats_file):
             stats[key] = f"{val:.1f}"
 
     return stats
-
-
 
 
 def chrom_sort_key(chrom):
@@ -181,4 +157,3 @@ if __name__ == "__main__":
 
     main(args.main_output_dir)
     compress_all_results(args.main_output_dir)
-

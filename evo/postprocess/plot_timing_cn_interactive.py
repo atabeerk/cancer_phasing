@@ -1817,6 +1817,15 @@ def write_interactive_html(
         }});
         return;
       }}
+
+      // Non-VAF mode should never display VAF traces.
+      const vafTraceIdx = [];
+      for (let i = 0; i < gd.data.length; i++) {{
+        const tr = gd.data[i];
+        if (tr && tr.meta && tr.meta.trace_role === "dist_vaf") vafTraceIdx.push(i);
+      }}
+      if (vafTraceIdx.length) Plotly.restyle(gd, {{ visible: Array(vafTraceIdx.length).fill(false) }}, vafTraceIdx);
+
       if (countMutOpt) {{
         countMutOpt.hidden = chainMode !== "rank";
       }}

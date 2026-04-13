@@ -274,7 +274,13 @@ std::unordered_map<std::string, PositionInfo> readMpileup(
 }
 
 
-static std::string majorityHaplotypeForAltSupportingReads(const PositionInfo& p) {
+static void hpSummaryForAltSupportingReads(
+    const PositionInfo& p,
+    std::string& hp_label,
+    float& hp_proportion,
+    int& hp1_alt_reads,
+    int& hp2_alt_reads
+) {
     int hp1 = 0;
     int hp2 = 0;
     for (const auto& [read, base] : p.readBase) {
@@ -286,9 +292,31 @@ static std::string majorityHaplotypeForAltSupportingReads(const PositionInfo& p)
         else if (itHP->second == 2) hp2++;
     }
 
-    if (hp1 == 0 && hp2 == 0) return "UNKNOWN";
-    if (hp1 == hp2) return "MIXED";
-    return (hp1 > hp2) ? "HP1" : "HP2";
+    hp1_alt_reads = hp1;
+    hp2_alt_reads = hp2;
+    const int total = hp1 + hp2;
+    if (total == 0) {
+        hp_label = "UNKNOWN";
+        hp_proportion = 0.0f;
+        return;
+    }
+    if (hp1 == hp2) {
+        hp_label = "MIXED";
+        hp_proportion = 0.5f;
+        return;
+    }
+    hp_label = (hp1 > hp2) ? "HP1" : "HP2";
+    hp_proportion = static_cast<float>(std::max(hp1, hp2)) / static_cast<float>(total);
+}
+
+void annotateSNVHpSummary(SNV& snv, const PositionInfo& p) {
+    hpSummaryForAltSupportingReads(
+        p,
+        snv.hp_label,
+        snv.hp_proportion,
+        snv.hp1_alt_reads,
+        snv.hp2_alt_reads
+    );
 }
 
 void compareSNVs(const SNV& s1, const SNV& s2,
@@ -324,8 +352,12 @@ void compareSNVs(const SNV& s1, const SNV& s2,
         else if (!isAlt1 && !isAlt2) refRef++;
     }
 
-    const std::string hap1 = majorityHaplotypeForAltSupportingReads(p1);
-    const std::string hap2 = majorityHaplotypeForAltSupportingReads(p2);
+    std::string hap1 = s1.hp_label;
+    std::string hap2 = s2.hp_label;
+    int hp1_reads1 = s1.hp1_alt_reads;
+    int hp2_reads1 = s1.hp2_alt_reads;
+    int hp1_reads2 = s2.hp1_alt_reads;
+    int hp2_reads2 = s2.hp2_alt_reads;
 
     out << s1.chrom << "\t" << s1.pos << "\t" << s2.pos
         << "\tVAF1=" << s1.vaf << "\tVAF2=" << s2.vaf
@@ -336,5 +368,7 @@ void compareSNVs(const SNV& s1, const SNV& s2,
         << "\tTOTAL=" << (altAlt + altRef + refAlt + refRef)
         << "\tHAP1=" << hap1
         << "\tHAP2=" << hap2
+        << "\tHP_READS1=" << hp1_reads1 << "/" << hp2_reads1
+        << "\tHP_READS2=" << hp1_reads2 << "/" << hp2_reads2
         << "\n";
 }

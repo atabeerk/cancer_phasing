@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Any, Set, Optional
 import csv
+import math
 
 from builder import GraphBuilder
 
@@ -24,9 +25,7 @@ def compute_component_statistics_rows(
     Connected components are computed on the undirected graph induced by ALL accepted edges.
     Timing direction is ignored for connectivity (we use builder.adj which is undirected).
 
-    Haplotype statistics reuse the existing cooccurrence union-find inside GraphBuilder:
-      - haplotypes = number of distinct cooccurrence cluster reps inside the CC
-      - multi_node_haplotypes = number of those reps whose cooccurrence cluster size > 1
+    Connected-component stats include positional and edge-support metrics only.
     """
     nodes = sorted(builder.nodes)
     if not nodes:
@@ -66,10 +65,6 @@ def compute_component_statistics_rows(
         for n in comp_nodes:
             node_to_comp[n] = cid
 
-    # --- Precompute cooccurrence cluster rep + sizes (reuse builder's DSU) ---
-    node_to_cluster: Dict[int, int] = {n: builder.get_cluster_rep(n) for n in nodes}
-    cluster_size: Dict[int, int] = builder.get_cluster_sizes()
-    
     # --- Accumulate edge-based stats per component in one pass ---
     num_comps = len(components)
     timing_edges = [0] * num_comps
@@ -106,10 +101,6 @@ def compute_component_statistics_rows(
         max_pos = comp_nodes_sorted[-1]
         span_bp = max_pos - min_pos
 
-        reps_in_cc = {node_to_cluster[n] for n in comp_nodes_sorted}
-        haplotypes = len(reps_in_cc)
-        multi_node_haplotypes = sum(1 for r in reps_in_cc if cluster_size.get(r, 1) > 1)
-
         avg_support = (
             (support_sum[cid] / edge_count[cid]) if edge_count[cid] > 0 else float("nan")
         )
@@ -129,9 +120,6 @@ def compute_component_statistics_rows(
                 "cooccurrence_edges": coocc_edges[cid],
                 "divergent_edges": div_edges[cid],
                 "avg_read_support": avg_support,
-
-                "haplotypes": haplotypes,
-                "multi_node_haplotypes": multi_node_haplotypes,
 
                 # Active copy-number fields are populated during postprocessing
                 # when CN BED files are provided.
@@ -164,4 +152,12 @@ def append_component_statistics_tsv(rows: List[Dict[str, Any]], out_path: str) -
         if not file_exists:
             w.writeheader()
         for r in rows:
-            w.writerow(r)
+            row = dict(r)
+            # Keep avg_read_support consistently to one decimal in output files.
+            if "avg_read_support" in row:
+                try:
+                    v = float(row["avg_read_support"])
+                    row["avg_read_support"] = f"{v:.1f}" if math.isfinite(v) else "nan"
+                except (TypeError, ValueError):
+                    pass
+            w.writerow(row)

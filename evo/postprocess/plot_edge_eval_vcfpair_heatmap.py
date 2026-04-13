@@ -28,6 +28,30 @@ def label_sort_key(label: str) -> Tuple[int, int, str]:
     return (1, 10**9, s)
 
 
+def chrom_sort_key(chrom: str) -> Tuple[int, int, str]:
+    c = str(chrom).strip()
+    c_lower = c.lower()
+    if c_lower.startswith("chr"):
+        c_core = c[3:]
+    else:
+        c_core = c
+    c_core_lower = c_core.lower()
+    if c_core_lower.isdigit():
+        return (0, int(c_core_lower), "")
+    special_rank = {
+        "x": (1, 23, "X"),
+        "y": (1, 24, "Y"),
+        "mt": (1, 25, "MT"),
+        "m": (1, 25, "MT"),
+        "mito": (1, 25, "MT"),
+        "mitochondria": (1, 25, "MT"),
+    }
+    if c_core_lower in special_rank:
+        grp, num, label = special_rank[c_core_lower]
+        return (grp, num, label)
+    return (2, 10**9, c)
+
+
 def load_rows(path: Path) -> List[Dict[str, int | str]]:
     out: List[Dict[str, int | str]] = []
     with path.open("rt", encoding="utf-8", newline="") as f:
@@ -67,6 +91,72 @@ def load_rows(path: Path) -> List[Dict[str, int | str]]:
                     row[k] = int(str(r.get(k, "0")).strip() or "0")
                 except ValueError:
                     row[k] = 0
+            out.append(row)
+    return out
+
+
+def load_chrom_summary_rows(path: Optional[Path]) -> List[Dict[str, int | str]]:
+    if path is None or not path.exists():
+        return []
+    out: List[Dict[str, int | str]] = []
+    with path.open("rt", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        required = {
+            "chrom",
+            "timing_total",
+            "timing_correct",
+            "timing_incorrect",
+            "timing_unknown",
+            "cooccur_total",
+            "cooccur_correct",
+            "cooccur_incorrect",
+            "cooccur_unknown",
+            "divergent_total",
+            "divergent_correct",
+            "divergent_incorrect",
+            "divergent_unknown",
+        }
+        missing = required.difference(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"{path} missing required columns: {', '.join(sorted(missing))}")
+        for r in reader:
+            chrom = str(r["chrom"]).strip()
+            if not chrom or chrom == "ALL":
+                continue
+            vals: Dict[str, int] = {}
+            for k in (
+                "timing_total",
+                "timing_correct",
+                "timing_incorrect",
+                "timing_unknown",
+                "cooccur_total",
+                "cooccur_correct",
+                "cooccur_incorrect",
+                "cooccur_unknown",
+                "divergent_total",
+                "divergent_correct",
+                "divergent_incorrect",
+                "divergent_unknown",
+            ):
+                try:
+                    vals[k] = int(str(r.get(k, "0")).strip() or "0")
+                except ValueError:
+                    vals[k] = 0
+            unknown = vals["timing_unknown"] + vals["cooccur_unknown"] + vals["divergent_unknown"]
+            total = vals["timing_total"] + vals["cooccur_total"] + vals["divergent_total"]
+            known_total = max(0, total - unknown)
+            row = {
+                "chrom_a": chrom,
+                "chrom_b": chrom,
+                "known_total": known_total,
+                "unknown": unknown,
+                "consistent_timing": vals["timing_correct"],
+                "consistent_cooccurrence": vals["cooccur_correct"],
+                "consistent_divergent": vals["divergent_correct"],
+                "inconsistent_timing": vals["timing_incorrect"],
+                "inconsistent_cooccurrence": vals["cooccur_incorrect"],
+                "inconsistent_divergent": vals["divergent_incorrect"],
+            }
             out.append(row)
     return out
 
@@ -145,6 +235,7 @@ def build_tree_payload(edges: List[Tuple[str, str]]) -> Dict[str, object]:
 
 def write_html(
     rows: List[Dict[str, int | str]],
+    chrpair_rows: List[Dict[str, int | str]],
     tree_payload: Dict[str, object],
     out_html: Path,
     title: str,
@@ -153,7 +244,17 @@ def write_html(
         {str(r["vcf_label_a"]) for r in rows} | {str(r["vcf_label_b"]) for r in rows},
         key=label_sort_key,
     )
-    payload = {"rows": rows, "labels": labels, "tree": tree_payload}
+    chr_labels = sorted(
+        {str(r["chrom_a"]) for r in chrpair_rows} | {str(r["chrom_b"]) for r in chrpair_rows},
+        key=chrom_sort_key,
+    )
+    payload = {
+        "rows": rows,
+        "labels": labels,
+        "chr_rows": chrpair_rows,
+        "chr_labels": chr_labels,
+        "tree": tree_payload,
+    }
     payload_json = json.dumps(payload)
 
     html = f"""<!DOCTYPE html>
@@ -170,6 +271,29 @@ def write_html(
       padding: 10px 12px; border-bottom: 1px solid #ddd; background: #fafafa;
     }}
     .controls select {{ padding: 6px 8px; font-size: 14px; }}
+    .mode-buttons {{
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      margin-right: 8px;
+    }}
+    .mode-btn {{
+      padding: 6px 10px;
+      font-size: 14px;
+      border: 1px solid #cfcfcf;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+    }}
+    .mode-btn.active {{
+      background: #1f77b4;
+      color: #fff;
+      border-color: #1f77b4;
+    }}
+    .mode-btn:disabled {{
+      cursor: not-allowed;
+      opacity: 0.55;
+    }}
     #status {{ font-size: 13px; color: #444; }}
     .content {{
       display: flex;
@@ -262,6 +386,12 @@ def write_html(
 </head>
 <body>
   <div class="controls">
+    <span>mode:</span>
+    <span class="mode-buttons">
+      <button type="button" id="mode-vcf-btn" class="mode-btn active" onclick="setAxisMode('vcf')">Tree Node</button>
+      <button type="button" id="mode-chrom-btn" class="mode-btn" onclick="setAxisMode('chrom')">Chromosome</button>
+    </span>
+
     <label for="status-mode">status:</label>
     <select id="status-mode" onchange="renderHeatmap()">
       <option value="consistent" selected>consistent</option>
@@ -310,15 +440,33 @@ def write_html(
     const payload = {payload_json};
     const rows = Array.isArray(payload.rows) ? payload.rows : [];
     const labels = Array.isArray(payload.labels) ? payload.labels : [];
+    const chrRows = Array.isArray(payload.chr_rows) ? payload.chr_rows : [];
+    const chrLabels = Array.isArray(payload.chr_labels) ? payload.chr_labels : [];
     const treePayload = payload.tree || {{ nodes: [], edges: [] }};
     const statusEl = document.getElementById("status");
     const selectedInfoEl = document.getElementById("selected-info");
+    const hasChrRows = chrRows.length > 0 && chrLabels.length > 0;
+    let currentAxisMode = "vcf";
 
-    function getPairMap() {{
+    function setAxisMode(mode) {{
+      if (mode !== "vcf" && mode !== "chrom") return;
+      if (mode === "chrom" && !hasChrRows) {{
+        statusEl.textContent = "Chromosome mode unavailable: missing edge_eval_summary.tsv";
+        return;
+      }}
+      currentAxisMode = mode;
+      const vcfBtn = document.getElementById("mode-vcf-btn");
+      const chromBtn = document.getElementById("mode-chrom-btn");
+      if (vcfBtn) vcfBtn.classList.toggle("active", mode === "vcf");
+      if (chromBtn) chromBtn.classList.toggle("active", mode === "chrom");
+      renderHeatmap();
+    }}
+
+    function getPairMap(inputRows, keyA, keyB) {{
       const out = new Map();
-      for (const r of rows) {{
-        const a = String(r.vcf_label_a || "UNKNOWN");
-        const b = String(r.vcf_label_b || "UNKNOWN");
+      for (const r of inputRows) {{
+        const a = String(r[keyA] || "UNKNOWN");
+        const b = String(r[keyB] || "UNKNOWN");
         out.set(a + "|" + b, r);
       }}
       return out;
@@ -365,22 +513,49 @@ def write_html(
     }}
 
     function renderHeatmap() {{
+      const axisMode = currentAxisMode;
       const statusMode = String(document.getElementById("status-mode").value || "consistent");
       const relationMode = String(document.getElementById("relation-mode").value || "timing");
       const valueMode = String(document.getElementById("value-mode").value || "count");
       const relationSel = document.getElementById("relation-mode");
       relationSel.disabled = (statusMode === "unknown");
 
-      const pairMap = getPairMap();
+      if (axisMode === "chrom" && !hasChrRows) {{
+        statusEl.textContent = "Chromosome mode unavailable: missing edge_eval_summary.tsv";
+        return;
+      }}
+
+      const axisLabels = axisMode === "chrom" ? chrLabels : labels;
+      const inputRows = axisMode === "chrom" ? chrRows : rows;
+      const keyA = axisMode === "chrom" ? "chrom_a" : "vcf_label_a";
+      const keyB = axisMode === "chrom" ? "chrom_b" : "vcf_label_b";
+      const axisTitle = axisMode === "chrom" ? "Chromosome" : "VCF label";
+      const pairLabel = axisMode === "chrom" ? "chromosome pair" : "vcf pair";
+
+      const pairMap = getPairMap(inputRows, keyA, keyB);
       const directionalMode = (relationMode === "timing");
       const z = [];
       const zText = [];
       const custom = [];
-      for (const a of labels) {{
+      for (const a of axisLabels) {{
         const rowZ = [];
         const rowText = [];
         const rowCustom = [];
-        for (const b of labels) {{
+        for (const b of axisLabels) {{
+          if (axisMode === "chrom" && String(a) !== String(b)) {{
+            rowZ.push(null);
+            rowText.push("");
+            rowCustom.push([
+              a, b, 0, 0,
+              0, 0, 0,
+              0, 0, 0,
+              0,
+              NaN,
+              "off-diagonal intentionally blank in chromosome mode",
+              axisMode
+            ]);
+            continue;
+          }}
           const r_ab = rowOrZero(pairMap.get(String(a) + "|" + String(b)) || null);
           const r_ba = rowOrZero(pairMap.get(String(b) + "|" + String(a)) || null);
           const r_unordered = String(a) === String(b) ? r_ab : mergeRows(r_ab, r_ba);
@@ -415,7 +590,8 @@ def write_html(
             i_t, i_c, i_d,
             rawCount,
             (known > 0 ? (100.0 * rawCount / known) : NaN),
-            directionalMode ? "timing directed (a->b); others unordered" : "unordered (a<->b)"
+            directionalMode ? "timing directed (a->b); others unordered" : "unordered (a<->b)",
+            axisMode
           ]);
         }}
         z.push(rowZ);
@@ -426,12 +602,13 @@ def write_html(
       const metricLabel = (statusMode === "unknown")
         ? "unknown"
         : (statusMode + " " + relationMode);
+      const titlePrefix = axisMode === "chrom" ? "Chromosome-pair heatmap" : "VCF-pair heatmap";
       const title = (valueMode === "pct_known")
-        ? ("VCF-pair heatmap: " + metricLabel + " (% of known relations)")
-        : ("VCF-pair heatmap: " + metricLabel + " (count)");
+        ? (titlePrefix + ": " + metricLabel + " (% of known relations)")
+        : (titlePrefix + ": " + metricLabel + " (count)");
 
       const hovertemplate =
-        "vcf pair: %{{customdata[0]}} - %{{customdata[1]}}<br>" +
+        pairLabel + ": %{{customdata[0]}} - %{{customdata[1]}}<br>" +
         "known_total: %{{customdata[2]}}<br>" +
         "unknown: %{{customdata[3]}}<br>" +
         "consistent_timing: %{{customdata[4]}}<br>" +
@@ -446,8 +623,8 @@ def write_html(
 
       const trace = {{
         type: "heatmap",
-        x: labels,
-        y: labels,
+        x: axisLabels,
+        y: axisLabels,
         z: z,
         text: zText,
         texttemplate: "%{{text}}",
@@ -461,8 +638,35 @@ def write_html(
       const layout = {{
         template: "plotly_white",
         margin: {{ l: 90, r: 30, t: 40, b: 120 }},
-        xaxis: {{ title: "VCF label", tickangle: -45, side: "top" }},
-        yaxis: {{ title: "VCF label", autorange: "reversed" }},
+        xaxis: {{
+          title: axisTitle,
+          tickangle: -45,
+          side: "top",
+          ...(axisMode === "chrom"
+            ? {{
+                type: "category",
+                tickmode: "array",
+                tickvals: axisLabels,
+                ticktext: axisLabels,
+                categoryorder: "array",
+                categoryarray: axisLabels,
+              }}
+            : {{}})
+        }},
+        yaxis: {{
+          title: axisTitle,
+          autorange: "reversed",
+          ...(axisMode === "chrom"
+            ? {{
+                type: "category",
+                tickmode: "array",
+                tickvals: axisLabels,
+                ticktext: axisLabels,
+                categoryorder: "array",
+                categoryarray: axisLabels,
+              }}
+            : {{}})
+        }},
         annotations: [{{
           text: title,
           xref: "paper",
@@ -496,9 +700,11 @@ def write_html(
         const selectedCount = Number(cd[10] || 0);
         const selectedPct = Number(cd[11]);
         const pctText = Number.isFinite(selectedPct) ? (selectedPct.toFixed(2) + "%") : "N/A";
+        const clickedAxisMode = String(cd[13] || axisMode);
+        const clickedPairLabel = clickedAxisMode === "chrom" ? "chromosome pair" : "vcf pair";
         const metricLabel = (statusMode === "unknown") ? "unknown" : (statusMode + " " + relationMode);
         selectedInfoEl.innerHTML =
-          "<div class='title'>Selected pair: <b>" + a + "</b> -> <b>" + b + "</b></div>" +
+          "<div class='title'>Selected " + clickedPairLabel + ": <b>" + a + "</b> -> <b>" + b + "</b></div>" +
           "<div><b>Selected metric</b>: " + metricLabel + " | " +
           (valueMode === "pct_known" ? "% of known relations" : "count") +
           "</div>" +
@@ -594,6 +800,12 @@ def write_html(
       Plotly.newPlot(treeDiv, traces, layout, {{ responsive: true, displayModeBar: false, staticPlot: true }});
     }}
 
+    const chromBtn = document.getElementById("mode-chrom-btn");
+    if (chromBtn && !hasChrRows) {{
+      chromBtn.disabled = true;
+      chromBtn.title = "Requires edge_eval_summary.tsv";
+    }}
+
     renderHeatmap();
     renderTree();
   </script>
@@ -611,6 +823,12 @@ def main() -> None:
         type=Path,
         default=None,
         help="Path to edge_eval_vcfpair_relation_counts.tsv (default: <outdir>/edge_eval_vcfpair_relation_counts.tsv).",
+    )
+    ap.add_argument(
+        "--summary-tsv",
+        type=Path,
+        default=None,
+        help="Path to edge_eval_summary.tsv (default: <outdir>/edge_eval_summary.tsv).",
     )
     ap.add_argument("--outdir", type=Path, required=True, help="Main output directory.")
     ap.add_argument("--tree", type=Path, default=None, help="Parent-child TSV used for static side tree panel.")
@@ -630,13 +848,19 @@ def main() -> None:
 
     outdir = args.outdir.resolve()
     counts_tsv = args.counts_tsv.resolve() if args.counts_tsv else (outdir / "edge_eval_vcfpair_relation_counts.tsv")
+    summary_tsv = (
+        args.summary_tsv.resolve()
+        if args.summary_tsv
+        else (outdir / "edge_eval_summary.tsv")
+    )
     if not counts_tsv.exists():
         raise FileNotFoundError(f"Counts TSV not found: {counts_tsv}")
     rows = load_rows(counts_tsv)
+    chrpair_rows = load_chrom_summary_rows(summary_tsv if summary_tsv.exists() else None)
     tree_edges = load_tree_edges(args.tree.resolve() if args.tree else None)
     tree_payload = build_tree_payload(tree_edges)
     out_html = outdir / args.output_name
-    write_html(rows, tree_payload, out_html, args.title)
+    write_html(rows, chrpair_rows, tree_payload, out_html, args.title)
     print(f"Wrote: {out_html}")
 
 

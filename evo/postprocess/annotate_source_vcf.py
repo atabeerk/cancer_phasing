@@ -512,8 +512,9 @@ def annotate_uncondensed_graph_copy_number_in_memory(
         if ann is None:
             continue
 
-        for k, v in ann.items():
-            data[k] = v
+        # Graph JSON nodes only carry per-haplotype CN; cn_total is omitted.
+        for k in ("cn_hp1", "cn_hp2"):
+            data[k] = ann.get(k)
         annotated += 1
 
     return seen, annotated
@@ -613,8 +614,9 @@ def annotate_condensed_graph_copy_number_in_memory(
         if ann is None:
             continue
 
-        for k, v in ann.items():
-            data[k] = v
+        # Graph JSON nodes only carry per-haplotype CN; cn_total is omitted.
+        for k in ("cn_hp1", "cn_hp2"):
+            data[k] = ann.get(k)
         annotated += 1
 
     return seen, annotated
@@ -993,7 +995,7 @@ def main():
         )
         print(
             "[cn_bed] Using dual-haplotype CN assignment (HP1 + HP2) with robust overlap matching; "
-            "output CN fields are: cn_hp1, cn_hp2, cn_total."
+            "graph CN fields are: cn_hp1, cn_hp2."
         )
 
     timing_stats: Dict[str, Dict[str, int]] = {}

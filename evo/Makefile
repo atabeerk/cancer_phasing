@@ -1,18 +1,38 @@
-run:
-	g++ -std=c++17 -g \
-	-I/home/donmeza2/software/htslib-1.20_install/include \
-	-Iinclude \
-	-D__STDC_LIMIT_MACROS \
-	-L/home/donmeza2/software/htslib-1.20_install/lib \
-	main.cpp snv_analysis.cpp process_snv_output.cpp \
-	-lhts -lz -lpthread -lstdc++fs \
-	-o main
+CXX ?= g++
+PYTHON ?= python3
+HTSLIB_PREFIX ?= $(CONDA_PREFIX)
+UNAME_S := $(shell uname -s)
 
-test:
-	./main /data/KolmogorovLab/donmeza2/cancer_phasing_data/1437_T_chr7_118m-120m_gdrive/H1437.haplotagged.chr7_118000000_120000000.merged.vcf.gz \
-	/data/KolmogorovLab/donmeza2/cancer_phasing_data/1437_T_chr7_118m-120m_gdrive/H1437.haplotagged.chr7_118000000_120000000.merged.bam \
-	/data/KolmogorovLab/donmeza2/cancer_phasing_data/output/H1437_chr7_118-120_output
+SRC = main.cpp snv_analysis.cpp process_snv_output.cpp
+BIN = main
+
+CXXFLAGS ?= -std=c++17 -g
+CPPFLAGS ?= -D__STDC_LIMIT_MACROS -I$(HTSLIB_PREFIX)/include -I../include
+LDFLAGS ?= -L$(HTSLIB_PREFIX)/lib
+LDLIBS ?= -lhts -lz -lpthread
+ifneq ($(UNAME_S),Darwin)
+LDLIBS += -lstdc++fs
+endif
+
+.PHONY: help build run test-smoke clean
+
+help:
+	@echo "make build       # compile evo/main"
+	@echo "make run         # alias for build"
+	@echo "make test-smoke  # lightweight runtime checks"
+	@echo "make clean       # remove build artifact"
+
+build: $(BIN)
+
+$(BIN): $(SRC)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) $(SRC) $(LDLIBS) -o $(BIN)
+
+run: build
+
+test-smoke: build
+	@./$(BIN) --help >/dev/null
+	@$(PYTHON) run_genome_by_chr.py --help >/dev/null
+	@echo "Smoke test passed."
 
 clean:
-	rm -f main \
-	rm -r /data/KolmogorovLab/donmeza2/cancer_phasing_data/output/H1437_chr7_118-120_output
+	rm -f $(BIN)

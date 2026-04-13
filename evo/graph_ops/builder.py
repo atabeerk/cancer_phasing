@@ -49,6 +49,8 @@ class GraphBuilder:
         self.node_chrom: Dict[int, str] = {}
         # Node-level haplotype tags (e.g., HP1/HP2/UNKNOWN). Optional.
         self.node_haplotype: Dict[int, str] = {}
+        # Node-level HP read counts (e.g., "12/3" for HP1/HP2 reads). Optional.
+        self.node_hp_reads: Dict[int, str] = {}
 
         # Rejected edges and reasons
         self.inconsistencies: List[Dict] = []
@@ -153,6 +155,30 @@ class GraphBuilder:
 
         self.node_haplotype[node] = "MIXED"
         self._log_conflict(edge, None, "node_haplotype_mismatch")
+        return False
+
+    def _register_node_hp_reads(self, node: int, hp_reads: Optional[str], edge: Edge) -> bool:
+        """
+        Record HP read-count string for a node, checking for consistency.
+        If conflicting non-empty values are seen, mark as MIXED.
+        """
+        if hp_reads is None:
+            return True
+
+        s = str(hp_reads).strip()
+        if not s:
+            return True
+
+        existing = self.node_hp_reads.get(node)
+        if existing is None:
+            self.node_hp_reads[node] = s
+            return True
+
+        if existing == s or existing == "MIXED":
+            return True
+
+        self.node_hp_reads[node] = "MIXED"
+        self._log_conflict(edge, None, "node_hp_reads_mismatch")
         return False
 
     # -------- Timing cycle check --------
@@ -587,6 +613,8 @@ class GraphBuilder:
         self._register_node_chrom(v, edge.chrom, edge)
         self._register_node_haplotype(u, edge.hap_u, edge)
         self._register_node_haplotype(v, edge.hap_v, edge)
+        self._register_node_hp_reads(u, edge.hp_reads_u, edge)
+        self._register_node_hp_reads(v, edge.hp_reads_v, edge)
         self._register_node_vaf(u, edge.vaf_u)
         self._register_node_vaf(v, edge.vaf_v)
 

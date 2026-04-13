@@ -4,7 +4,7 @@ Run postprocessing steps on main output:
   1) annotate_source_vcf (optional; if --vcfs and/or --cn-bed-hp1/--cn-bed-hp2)
   2) report_condensed_timing_chains (always)
   3) evaluate_graphs (optional; if --tree)
-  4) plot_edge_eval_vcfpair_heatmap (optional; if --vcfs and --tree)
+  4) plot_edge_eval_vcfpair_heatmap (optional; if --tree)
   5) summarize_and_compress (always)
   6) plot_timing_cn_interactive (always; CN overlays optional)
   7) plot_max_phase_block_by_chr (always)
@@ -72,8 +72,17 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Print commands and exit.")
     args = parser.parse_args()
 
-    if (args.cn_bed_hp1 is None) != (args.cn_bed_hp2 is None):
-        parser.error("Provide both --cn-bed-hp1 and --cn-bed-hp2 together.")
+    has_vcfs = args.vcfs is not None
+    has_tree = args.tree is not None
+    has_cn_pair = args.cn_bed_hp1 is not None and args.cn_bed_hp2 is not None
+    has_partial_cn = (args.cn_bed_hp1 is None) != (args.cn_bed_hp2 is None)
+    if has_partial_cn:
+        print(
+            "Warning: only one CN BED argument was provided; "
+            "CN-dependent postprocessing will be skipped. "
+            "Provide both --cn-bed-hp1 and --cn-bed-hp2 to enable CN overlays/annotation.",
+            file=sys.stderr,
+        )
 
     postprocess_dir = Path(__file__).resolve().parent
     evo_dir = postprocess_dir.parent
@@ -88,25 +97,25 @@ def main() -> None:
     outdir = args.outdir.resolve()
     steps: list[tuple[str, list[str]]] = []
 
-    if args.vcfs is not None or args.cn_bed_hp1 is not None:
+    if has_vcfs or has_cn_pair:
         cmd = [sys.executable, str(annotate_script), "--main_out", str(outdir)]
-        if args.vcfs is not None:
+        if has_vcfs:
             cmd.extend(["--vcfs", str(args.vcfs.resolve())])
-        if args.cn_bed_hp1 is not None and args.cn_bed_hp2 is not None:
+        if has_cn_pair:
             cmd.extend(["--cn-bed-hp1", str(args.cn_bed_hp1.resolve())])
             cmd.extend(["--cn-bed-hp2", str(args.cn_bed_hp2.resolve())])
         steps.append(("annotate_source_vcf", cmd))
 
     steps.append(("report_condensed_timing_chains", [sys.executable, str(timing_script), "--outdir", str(outdir)]))
 
-    if args.tree is not None:
+    if has_tree:
         steps.append(
             (
                 "evaluate_graphs",
                 [sys.executable, str(evaluate_script), "--outdir", str(outdir), "--tree", str(args.tree.resolve())],
             )
         )
-    if args.tree is not None and args.vcfs is not None:
+    if has_tree:
         steps.append(
             (
                 "plot_edge_eval_vcfpair_heatmap",
@@ -124,7 +133,7 @@ def main() -> None:
     steps.append(("summarize_and_compress", [sys.executable, str(summarize_script), str(outdir)]))
 
     interactive_cmd = [sys.executable, str(interactive_plot_script), "--outdir", str(outdir)]
-    if args.cn_bed_hp1 is not None and args.cn_bed_hp2 is not None:
+    if has_cn_pair:
         interactive_cmd.extend(["--cn-bed-hp1", str(args.cn_bed_hp1.resolve())])
         interactive_cmd.extend(["--cn-bed-hp2", str(args.cn_bed_hp2.resolve())])
     steps.append(("plot_timing_cn_interactive", interactive_cmd))
@@ -170,4 +179,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

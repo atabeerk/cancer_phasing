@@ -1,0 +1,17 @@
+name: cancer-phasing
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.10
+  - cxx-compiler
+  - make
+  - minimap2>=2.24,<2.29
+  - samtools=1.21
+  - bcftools=1.21
+  - htslib=1.21
+  - pandas=1.3
+  - matplotlib=3.8
+  - pip
+  - pip:
+      - plotly==6.6.0

@@ -13,6 +13,10 @@ struct SNV {
     char ref;
     char alt;
     float vaf;
+    std::string hp_label = "UNKNOWN";
+    float hp_proportion = 0.0f;
+    int hp1_alt_reads = 0;
+    int hp2_alt_reads = 0;
 };
 
 struct PositionInfo {
@@ -31,6 +35,9 @@ std::unordered_map<std::string, PositionInfo> readMpileup(
     const std::string& mpileupFile,
     const std::vector<SNV>& snvs
 );
+
+// Populate per-SNV HP label/proportion/read counts from pileup info.
+void annotateSNVHpSummary(SNV& snv, const PositionInfo& p);
 
 // Compare two SNVs and print their co-occurrence counts
 void compareSNVs(const SNV& s1, const SNV& s2,

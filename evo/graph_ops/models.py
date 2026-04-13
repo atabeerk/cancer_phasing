@@ -33,3 +33,5 @@ class Edge:
     source_file: str = ""
     hap_u: Optional[str] = None
     hap_v: Optional[str] = None
+    hp_reads_u: Optional[str] = None
+    hp_reads_v: Optional[str] = None

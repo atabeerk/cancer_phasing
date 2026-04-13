@@ -3,9 +3,102 @@
 import json
 import csv
 from collections import Counter
-from typing import Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from builder import GraphBuilder
+
+
+def _median(values: List[float]) -> Optional[float]:
+    """Return the median of a non-empty list; otherwise None."""
+    if not values:
+        return None
+    vals = sorted(values)
+    n = len(vals)
+    mid = n // 2
+    if n % 2 == 1:
+        return float(vals[mid])
+    return float((vals[mid - 1] + vals[mid]) / 2.0)
+
+
+def _lower_median(values: List[float]) -> Optional[float]:
+    """Return median using lower middle value for even-length inputs."""
+    if not values:
+        return None
+    vals = sorted(values)
+    return float(vals[(len(vals) - 1) // 2])
+
+
+def _component_layout_positions(
+    node_ids: List[int],
+    edges: Iterable[Tuple[int, int]],
+    node_x_sort: Dict[int, float],
+    node_y_sort: Dict[int, float],
+    node_x_gap: float = 80.0,
+    node_y_gap: float = 70.0,
+    component_gap: float = 220.0,
+) -> Dict[int, Dict[str, float]]:
+    """
+    Compute Cytoscape positions with these rules:
+      1) Genomic coordinate and VAF are used only for sorting.
+      2) Actual x/y positions are synthetic, rank-based, and evenly spaced.
+      3) Connected components are ordered left-to-right by component minimum
+         genomic coordinate key and separated by a fixed gap.
+    """
+    adj: Dict[int, set] = {n: set() for n in node_ids}
+    for u, v in edges:
+        if u in adj and v in adj:
+            adj[u].add(v)
+            adj[v].add(u)
+
+    # Build connected components.
+    components: List[List[int]] = []
+    seen = set()
+    for n in sorted(node_ids):
+        if n in seen:
+            continue
+        stack = [n]
+        seen.add(n)
+        comp = []
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for nxt in adj.get(cur, ()):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        components.append(comp)
+
+    # Sort components by their minimum coordinate, then by min node id for stability.
+    components.sort(
+        key=lambda comp: (
+            min(node_x_sort[m] for m in comp),
+            min(comp),
+        )
+    )
+
+    positions: Dict[int, Dict[str, float]] = {}
+    comp_start_x = 0.0
+    for comp in components:
+        x_order = sorted(comp, key=lambda n: (node_x_sort[n], node_y_sort[n], n))
+        # Bin VAF values into 0.05-width buckets so each bucket shares a y-level.
+        # Example bins: [0.00,0.05), [0.05,0.10), ...
+        y_bin = {n: int(node_y_sort[n] / 0.05) for n in comp}
+        present_bins = sorted(set(y_bin.values()))
+        bin_rank = {b: i for i, b in enumerate(present_bins)}
+        y_mid = (len(present_bins) - 1) / 2.0 if present_bins else 0.0
+
+        for i, n in enumerate(x_order):
+            positions[n] = {
+                "x": float(comp_start_x + i * node_x_gap),
+                # Cytoscape screen coordinates increase downward in y, so negate
+                # the bin offset to place higher VAF bins visually higher.
+                "y": float((y_mid - bin_rank[y_bin[n]]) * node_y_gap),
+            }
+
+        comp_width = max(0.0, (len(comp) - 1) * node_x_gap)
+        comp_start_x += comp_width + component_gap
+
+    return positions
 
 
 def export_cytoscape_json(
@@ -45,9 +138,22 @@ def export_cytoscape_json(
     if name is None:
         name = "chunk_graph"
 
+    sorted_nodes = sorted(builder.nodes)
+    node_x_sort = {pos: float(pos) for pos in sorted_nodes}
+    node_y_sort = {
+        pos: float(builder.node_vaf[pos]) if builder.node_vaf.get(pos) is not None else 0.0
+        for pos in sorted_nodes
+    }
+    uncondensed_positions = _component_layout_positions(
+        node_ids=sorted_nodes,
+        edges=((e.u, e.v) for e in builder.edges),
+        node_x_sort=node_x_sort,
+        node_y_sort=node_y_sort,
+    )
+
     # Nodes: positions + VAF
     nodes_json = []
-    for pos in sorted(builder.nodes):
+    for pos in sorted_nodes:
         # Keep position as string for visualization tools (e.g., Cytoscape)
         # to avoid scientific-notation formatting of large genomic coordinates.
         data = {"id": str(pos), "position": str(pos)}
@@ -58,7 +164,11 @@ def export_cytoscape_json(
         if vaf is not None:
             data["vaf"] = vaf
         data["haplotype"] = builder.node_haplotype.get(pos, "UNKNOWN")
-        nodes_json.append({"data": data})
+        data["hp_reads"] = builder.node_hp_reads.get(pos, "UNKNOWN")
+        nodes_json.append({
+            "data": data,
+            "position": uncondensed_positions[pos],
+        })
 
     # Edges with directed flag and read counts / label
     edges_json = []
@@ -169,19 +279,19 @@ def export_condensed_cytoscape_json(
     for rep in sorted(clusters_used.keys()):
         members = sorted(clusters_used[rep])
 
-        # Aggregate VAFs over members (if available)
+        # Aggregate VAFs over members (if available); condensed values are medians.
         vafs = [
             builder.node_vaf.get(n)
             for n in members
             if n in builder.node_vaf and builder.node_vaf.get(n) is not None
         ]
-        mean_vaf = sum(vafs) / len(vafs) if vafs else None
+        median_vaf = _median([float(v) for v in vafs]) if vafs else None
+        median_position = _lower_median([float(m) for m in members]) if members else None
 
         data = {
             "id": str(rep),
             # Store large integer-like fields as strings to prevent scientific
             # notation in downstream graph viewers.
-            "cluster_id": str(rep),
             "members": [str(m) for m in members],
             "cluster_size": len(members),
         }
@@ -191,10 +301,15 @@ def export_condensed_cytoscape_json(
         if chrom is not None:
             data["chrom"] = chrom
 
-        # Use the smallest position as a representative "position" for layout
-        data["position"] = str(members[0])
-        if mean_vaf is not None:
-            data["vaf"] = mean_vaf
+        # Store median coordinate in the canonical "position" field.
+        # Keep as string to avoid scientific notation in downstream viewers.
+        if median_position is not None:
+            data["position"] = str(int(median_position))
+        else:
+            data["position"] = str(members[0])
+        data["position_min"] = str(members[0])
+        if median_vaf is not None:
+            data["vaf"] = median_vaf
 
         # Condensed node haplotype summary:
         # choose majority haplotype; explicitly flag if mixed within cluster.
@@ -202,10 +317,12 @@ def export_condensed_cytoscape_json(
         hap_counts = Counter(member_haps)
         top_hap, top_count = sorted(hap_counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
         informative_haps = {h for h in hap_counts if h not in {"UNKNOWN", "MIXED"}}
+        hp1_count = hap_counts.get("HP1", 0)
+        hp2_count = hap_counts.get("HP2", 0)
+        unk_count = len(members) - hp1_count - hp2_count
         data["haplotype"] = top_hap
         data["mixed_haplotypes"] = ("MIXED" in hap_counts) or (len(informative_haps) > 1)
-        data["haplotype_counts"] = dict(sorted(hap_counts.items()))
-        data["haplotype_majority_fraction"] = (top_count / len(members)) if members else 0.0
+        data["hp_counts(hp1/hp2/unk)"] = f"{hp1_count}/{hp2_count}/{unk_count}"
 
         nodes_json.append({"data": data})
 
@@ -302,6 +419,29 @@ def export_condensed_cytoscape_json(
             }
         })
 
+    # Compute condensed-layout positions using median coordinate and median VAF.
+    condensed_node_ids = sorted(clusters_used.keys())
+    condensed_x_sort: Dict[int, float] = {}
+    condensed_y_sort: Dict[int, float] = {}
+    node_index = {
+        int(node_obj["data"]["id"]): node_obj
+        for node_obj in nodes_json
+    }
+    for rep in condensed_node_ids:
+        d = node_index[rep]["data"]
+        condensed_x_sort[rep] = float(d["position"])
+        condensed_y_sort[rep] = float(d["vaf"]) if d.get("vaf") is not None else 0.0
+
+    condensed_positions = _component_layout_positions(
+        node_ids=condensed_node_ids,
+        edges=((int(rec["u"]), int(rec["v"])) for rec in agg_edges.values()),
+        node_x_sort=condensed_x_sort,
+        node_y_sort=condensed_y_sort,
+    )
+    for node_obj in nodes_json:
+        rep = int(node_obj["data"]["id"])
+        node_obj["position"] = condensed_positions[rep]
+
     graph = {
         "data": {"name": name},
         "elements": {"nodes": nodes_json, "edges": edges_json},
@@ -368,6 +508,7 @@ def write_accepted_edges(builder: GraphBuilder, out_path: str) -> None:
 
       chr pos1 pos2 RELATION=... LOSS=... VAF1=... VAF2=...
       ALT_ALT=... ALT_REF=... REF_ALT=... REF_REF=... TOTAL=...
+      HP_READS1=... HP_READS2=...
       RELIABILITY=... BEST_SCORE=... MARGIN=...
 
     where pos1=u, pos2=v (the oriented endpoints used in the graph).
@@ -388,6 +529,8 @@ def write_accepted_edges(builder: GraphBuilder, out_path: str) -> None:
                 f"REF_ALT={e.ref_alt} "
                 f"REF_REF={e.ref_ref} "
                 f"TOTAL={total} "
+                f"HP_READS1={(e.hp_reads_u if e.hp_reads_u is not None else 'UNKNOWN')} "
+                f"HP_READS2={(e.hp_reads_v if e.hp_reads_v is not None else 'UNKNOWN')} "
                 f"RELIABILITY={e.reliability} "
                 f"BEST_SCORE={e.best_score} "
                 f"MARGIN={e.margin}"

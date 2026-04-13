@@ -12,6 +12,62 @@ from export_graph import export_cytoscape_json, export_condensed_cytoscape_json,
 from component_stats import compute_component_statistics_rows, append_component_statistics_tsv
 
 
+RELATIONS = ("cooccurring", "timing", "divergent")
+
+
+def _new_edge_haplotype_counters():
+    return {
+        relation: {
+            "total": 0,
+            "without_loss": 0,
+            "with_loss": 0,
+            "same_haplotype": 0,
+            "different_haplotype": 0,
+            "at_least_one_unknown": 0,
+            "hp1_hp1": 0,
+            "hp2_hp2": 0,
+        }
+        for relation in RELATIONS
+    }
+
+
+def _normalize_hp(hp):
+    if hp is None:
+        return "UNKNOWN"
+    s = str(hp).strip().upper()
+    if s in {"HP1", "1", "H1"}:
+        return "HP1"
+    if s in {"HP2", "2", "H2"}:
+        return "HP2"
+    # Per requirement, treat MIXED as UNKNOWN.
+    return "UNKNOWN"
+
+
+def _update_edge_haplotype_counters(counters, edge):
+    rel = edge.relation
+    if rel not in counters:
+        return
+    rec = counters[rel]
+    rec["total"] += 1
+    if edge.loss:
+        rec["with_loss"] += 1
+    else:
+        rec["without_loss"] += 1
+
+    hu = _normalize_hp(edge.hap_u)
+    hv = _normalize_hp(edge.hap_v)
+    if hu == "UNKNOWN" or hv == "UNKNOWN":
+        rec["at_least_one_unknown"] += 1
+        return
+    if hu == hv:
+        rec["same_haplotype"] += 1
+        if hu == "HP1":
+            rec["hp1_hp1"] += 1
+        elif hu == "HP2":
+            rec["hp2_hp2"] += 1
+    else:
+        rec["different_haplotype"] += 1
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -62,6 +118,7 @@ def main():
     all_timing_nodes = set()
     total_accepted_edges = 0
     total_timing_edges = 0
+    edge_haplotype_counters = _new_edge_haplotype_counters()
 
     for base in bases:
         basename = os.path.basename(base)
@@ -80,6 +137,7 @@ def main():
         all_graph_nodes.update(builder.nodes)
         total_accepted_edges += len(builder.edges)
         for e in builder.edges:
+            _update_edge_haplotype_counters(edge_haplotype_counters, e)
             if e.relation == "timing":
                 all_timing_nodes.add(e.u)
                 all_timing_nodes.add(e.v)
@@ -129,7 +187,7 @@ def main():
         + (f"  ({_pct(n_in_relations, total_snvs)} of total)" if total_snvs > 0 else "")
     )
     lines.append(
-        f"    In graph (accepted edges):          {n_in_graph}"
+        f"    In graph (has at least one accepted edge): {n_in_graph}"
         + (f"  ({_pct(n_in_graph, n_in_relations)} of connected)" if n_in_relations > 0 else "")
     )
     lines.append(
@@ -142,7 +200,7 @@ def main():
     )
     if total_snvs > 0:
         lines.append(
-            f"  Singleton (no pairwise relations):    {n_singleton}"
+            f"  Singleton (has no pairwise relations): {n_singleton}"
             f"  ({_pct(n_singleton, total_snvs)} of total)"
         )
     lines.append(f"Total accepted edges:                  {total_accepted_edges}")
@@ -150,23 +208,32 @@ def main():
 
     summary_text = "\n".join(lines)
     print(summary_text)
-
-    stats_path = os.path.join(chrom_out_dir, "mutation_stats.txt")
-    with open(stats_path, "w") as f:
-        f.write(summary_text + "\n")
-    print(f"[graph_ops] Wrote mutation stats: {stats_path}")
-
-    tsv_path = os.path.join(chrom_out_dir, "mutation_stats.tsv")
-    with open(tsv_path, "w") as f:
-        f.write("metric\tcount\n")
-        f.write(f"total_snvs\t{total_snvs}\n")
-        f.write(f"in_relations\t{n_in_relations}\n")
-        f.write(f"in_graph\t{n_in_graph}\n")
-        f.write(f"with_timing\t{n_with_timing}\n")
-        f.write(f"orphaned\t{n_orphaned}\n")
-        f.write(f"singleton\t{n_singleton}\n")
-        f.write(f"accepted_edges\t{total_accepted_edges}\n")
-        f.write(f"timing_edges\t{total_timing_edges}\n")
+    # Machine-readable lines for chromosome logs (parsed by run_genome_by_chr.py).
+    print(
+        "[graph_ops_mutation_stats] "
+        f"total_snvs={total_snvs} "
+        f"in_relations={n_in_relations} "
+        f"in_graph={n_in_graph} "
+        f"with_timing={n_with_timing} "
+        f"orphaned={n_orphaned} "
+        f"singleton={n_singleton} "
+        f"accepted_edges={total_accepted_edges} "
+        f"timing_edges={total_timing_edges}"
+    )
+    for relation in RELATIONS:
+        rec = edge_haplotype_counters[relation]
+        print(
+            "[graph_ops_edge_hap] "
+            f"relation={relation} "
+            f"total={rec['total']} "
+            f"without_loss={rec['without_loss']} "
+            f"with_loss={rec['with_loss']} "
+            f"same_haplotype={rec['same_haplotype']} "
+            f"different_haplotype={rec['different_haplotype']} "
+            f"at_least_one_unknown={rec['at_least_one_unknown']} "
+            f"hp1_hp1={rec['hp1_hp1']} "
+            f"hp2_hp2={rec['hp2_hp2']}"
+        )
 
 
 if __name__ == "__main__":
