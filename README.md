@@ -31,7 +31,9 @@ Create the environment with either tool:
 
 ```bash
 conda env create -n cancer-phasing -f environment.yml
-# or
+```
+or
+```bash
 mamba env create -n cancer-phasing -f environment.yml
 ```
 
