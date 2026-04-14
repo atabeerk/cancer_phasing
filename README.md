@@ -1,6 +1,6 @@
 # Phasing Tumor Clones By Timing Somatic Mutations In Bulk Long-Read Sequencing
 
-This repo contains an in progress tool for phasing somatic SNVs into clonal haplotypes based on their co-occurrence patterns in the reads.
+This repo contains an actively developed tool for phasing somatic SNVs into clonal haplotypes based on their co-occurrence patterns in the reads.
 Required inputs are:
 
 1. A `.vcf.gz` file containing somatic only variants.
