@@ -279,21 +279,30 @@ static void hpSummaryForAltSupportingReads(
     std::string& hp_label,
     float& hp_proportion,
     int& hp1_alt_reads,
-    int& hp2_alt_reads
+    int& hp2_alt_reads,
+    int& nohp_alt_reads,
+    int& total_coverage_reads
 ) {
     int hp1 = 0;
     int hp2 = 0;
+    int nohp = 0;
+    total_coverage_reads = static_cast<int>(p.readBase.size());
     for (const auto& [read, base] : p.readBase) {
         bool isAlt = (std::toupper(base) == std::toupper(p.alt));
         if (!isAlt) continue;
         auto itHP = p.readHP.find(read);
-        if (itHP == p.readHP.end()) continue;
+        if (itHP == p.readHP.end()) {
+            nohp++;
+            continue;
+        }
         if (itHP->second == 1) hp1++;
         else if (itHP->second == 2) hp2++;
+        else nohp++;
     }
 
     hp1_alt_reads = hp1;
     hp2_alt_reads = hp2;
+    nohp_alt_reads = nohp;
     const int total = hp1 + hp2;
     if (total == 0) {
         hp_label = "UNKNOWN";
@@ -315,7 +324,9 @@ void annotateSNVHpSummary(SNV& snv, const PositionInfo& p) {
         snv.hp_label,
         snv.hp_proportion,
         snv.hp1_alt_reads,
-        snv.hp2_alt_reads
+        snv.hp2_alt_reads,
+        snv.nohp_alt_reads,
+        snv.total_coverage_reads
     );
 }
 

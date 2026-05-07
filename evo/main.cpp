@@ -224,6 +224,55 @@ void generateGraphs(const std::string& outDir, int totalSnvs) {
     }
 }
 
+struct HaplotypeSnvSummary {
+    int total_coverage = 0;
+    int hp1_alt_reads = 0;
+    int hp2_alt_reads = 0;
+    int nohp_alt_reads = 0;
+};
+
+static std::string hpAssignmentFromCounts(int hp1, int hp2) {
+    if (hp1 == 0 && hp2 == 0) return "UNKNOWN";
+    if (hp1 > hp2) return "HP1";
+    if (hp2 > hp1) return "HP2";
+    return "MIXED";
+}
+
+static void writeHaplotaggedSnvsTsv(
+    const fs::path& outDir,
+    const std::vector<SNV>& snvs,
+    const std::unordered_map<std::string, HaplotypeSnvSummary>& by_key
+) {
+    const fs::path out_path = outDir / "haplotagged_snvs.tsv";
+    std::ofstream out(out_path);
+    if (!out.is_open()) {
+        std::cerr << "Warning: failed to write " << out_path << "\n";
+        return;
+    }
+
+    out << "CHR\tPOSITION\tTOTAL_COVERAGE\tHP_COUNTS\tHP_ASSIGNMENT\n";
+    for (const auto& s : snvs) {
+        const std::string key = s.chrom + ":" + std::to_string(s.pos);
+        int total_coverage = 0;
+        int hp1 = 0;
+        int hp2 = 0;
+        int nohp = 0;
+        auto it = by_key.find(key);
+        if (it != by_key.end()) {
+            total_coverage = it->second.total_coverage;
+            hp1 = it->second.hp1_alt_reads;
+            hp2 = it->second.hp2_alt_reads;
+            nohp = it->second.nohp_alt_reads;
+        }
+        out << s.chrom << '\t'
+            << s.pos << '\t'
+            << total_coverage << '\t'
+            << hp1 << "/" << hp2 << "/" << nohp << '\t'
+            << hpAssignmentFromCounts(hp1, hp2) << '\n';
+    }
+    out.close();
+}
+
 
 int main(int argc, char* argv[]) {
     auto printUsage = [&]() {
@@ -315,6 +364,11 @@ int main(int argc, char* argv[]) {
 
     // Read SNVs from VCF (optionally using FORMAT/AD from a specific sample)
     auto snvs = readVCF(vcfFile, vcfSampleName);
+    std::unordered_map<std::string, HaplotypeSnvSummary> hap_summaries;
+    hap_summaries.reserve(snvs.size());
+    for (const auto& s : snvs) {
+        hap_summaries.emplace(s.chrom + ":" + std::to_string(s.pos), HaplotypeSnvSummary{});
+    }
 
     // Group SNVs by chromosome
     std::unordered_map<std::string, std::vector<SNV>> chrom_snvs;
@@ -398,6 +452,11 @@ int main(int argc, char* argv[]) {
                 auto it = pileup.find(key);
                 if (it != pileup.end()) {
                     annotateSNVHpSummary(s, it->second);
+                    auto& rec = hap_summaries[key];
+                    rec.total_coverage = s.total_coverage_reads;
+                    rec.hp1_alt_reads = s.hp1_alt_reads;
+                    rec.hp2_alt_reads = s.hp2_alt_reads;
+                    rec.nohp_alt_reads = s.nohp_alt_reads;
                 }
             }
 
@@ -430,6 +489,7 @@ int main(int argc, char* argv[]) {
     std::cout << "\n All processing complete.\n";
     std::cout << "   Pileup files in: " << pileupDir << "\n";
     std::cout << "   Chunk files in:  " << chunkDir  << "\n";
+    writeHaplotaggedSnvsTsv(fs::path(outDir), snvs, hap_summaries);
 
     generateGraphs(outDir, static_cast<int>(snvs.size()));
 

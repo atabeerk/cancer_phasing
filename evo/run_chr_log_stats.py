@@ -103,6 +103,10 @@ def extract_mutation_stats_from_chrom_log(chrom_log_path):
                 "singleton",
                 "accepted_edges",
                 "timing_edges",
+                "hp1",
+                "hp2",
+                "mixed",
+                "unknown",
             ):
                 try:
                     stats[key] = int(kv.get(key, "0"))

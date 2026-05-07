@@ -138,6 +138,22 @@ def build_mutation_summary(genome_mutation_stats):
             f"  Singleton (has no pairwise relations): {g['singleton']}"
             f"  ({_pct(g['singleton'], g['total_snvs'])} of total)"
         )
+    mut_lines.append(
+        f"  HP1 assigned:                         {g['hp1']}"
+        + (f"  ({_pct(g['hp1'], g['total_snvs'])} of total)" if g["total_snvs"] > 0 else "")
+    )
+    mut_lines.append(
+        f"  HP2 assigned:                         {g['hp2']}"
+        + (f"  ({_pct(g['hp2'], g['total_snvs'])} of total)" if g["total_snvs"] > 0 else "")
+    )
+    mut_lines.append(
+        f"  MIXED assigned:                       {g['mixed']}"
+        + (f"  ({_pct(g['mixed'], g['total_snvs'])} of total)" if g["total_snvs"] > 0 else "")
+    )
+    mut_lines.append(
+        f"  UNKNOWN assigned:                     {g['unknown']}"
+        + (f"  ({_pct(g['unknown'], g['total_snvs'])} of total)" if g["total_snvs"] > 0 else "")
+    )
     mut_lines.append(f"Total accepted edges:                  {g['accepted_edges']}")
     mut_lines.append(f"  - timing edges:                      {g['timing_edges']}")
     return "\n".join(mut_lines)

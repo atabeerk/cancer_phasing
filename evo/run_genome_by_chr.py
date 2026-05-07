@@ -30,6 +30,48 @@ from run_chr_worker import (
 )
 
 
+def merge_haplotagged_snv_tsvs(outdir, chromosomes):
+    """
+    Merge per-chromosome haplotagged SNV tables into one top-level TSV.
+    Inputs are expected at:
+      <outdir>/<chrom>_out/haplotagged_snvs.tsv
+    Output is written to:
+      <outdir>/haplotagged_snvs.tsv
+    """
+    merged_path = os.path.join(outdir, "haplotagged_snvs.tsv")
+    wrote_header = False
+    merged_files = 0
+    rows_written = 0
+
+    with open(merged_path, "w", encoding="utf-8") as out:
+        for chrom, _length in chromosomes:
+            per_chrom = os.path.join(outdir, f"{chrom}_out", "haplotagged_snvs.tsv")
+            if not os.path.exists(per_chrom):
+                continue
+
+            with open(per_chrom, "r", encoding="utf-8") as inp:
+                header = inp.readline()
+                if not header:
+                    continue
+                if not wrote_header:
+                    out.write(header.rstrip("\n") + "\n")
+                    wrote_header = True
+
+                for line in inp:
+                    if not line.strip():
+                        continue
+                    out.write(line.rstrip("\n") + "\n")
+                    rows_written += 1
+            merged_files += 1
+
+    # Ensure a valid header-only file exists even if no per-chrom files were found.
+    if not wrote_header:
+        with open(merged_path, "w", encoding="utf-8") as out:
+            out.write("CHR\tPOSITION\tTOTAL_COVERAGE\tHP_COUNTS\tHP_ASSIGNMENT\n")
+
+    return merged_path, merged_files, rows_written
+
+
 def main():
     # Parse and normalize CLI inputs used by the orchestration layer.
     args = parse_args()
@@ -83,6 +125,10 @@ def main():
         "singleton": 0,
         "accepted_edges": 0,
         "timing_edges": 0,
+        "hp1": 0,
+        "hp2": 0,
+        "mixed": 0,
+        "unknown": 0,
     }
     genome_edge_haplotype_stats = new_edge_haplotype_summary()
     chrom_haplotag_detected = {}
@@ -237,6 +283,13 @@ def main():
         post_cmd.extend(["--tree", os.path.abspath(post_tree)])
 
     with open(run_log_path, "a", encoding="utf-8") as run_log:
+        merged_tsv, merged_files, merged_rows = merge_haplotagged_snv_tsvs(outdir, chromosomes)
+        run_log.write(
+            f"haplotagged_snv_table={merged_tsv}\t"
+            f"source_chrom_files={merged_files}\trows={merged_rows}\n"
+        )
+        run_log.flush()
+
         write_postprocessing_header(run_log)
         run_log.flush()
         run_cmd(post_cmd, log_fh=run_log)

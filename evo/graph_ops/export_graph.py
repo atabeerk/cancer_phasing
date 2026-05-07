@@ -469,6 +469,7 @@ def write_inconsistency_log(builder: GraphBuilder, out_path: str) -> None:
       - pair_type_conflict
       - pair_direction_conflict
       - cluster_merge_noncooccurring
+      - cluster_merge_timing_cycle
       - cluster_internal_timing
       - cluster_internal_divergent
       - timing_cycle

@@ -17,6 +17,8 @@ struct SNV {
     float hp_proportion = 0.0f;
     int hp1_alt_reads = 0;
     int hp2_alt_reads = 0;
+    int nohp_alt_reads = 0;
+    int total_coverage_reads = 0;
 };
 
 struct PositionInfo {

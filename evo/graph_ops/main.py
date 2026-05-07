@@ -1,6 +1,8 @@
 import os
 import sys
 import argparse
+import csv
+import time
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
@@ -8,6 +10,7 @@ if CURRENT_DIR not in sys.path:
 
 from parsing import find_chunk_bases, load_edges_from_base
 from builder import GraphBuilder
+from fast_builder import FastGraphBuilder
 from export_graph import export_cytoscape_json, export_condensed_cytoscape_json, write_inconsistency_log, write_accepted_edges
 from component_stats import compute_component_statistics_rows, append_component_statistics_tsv
 
@@ -69,6 +72,30 @@ def _update_edge_haplotype_counters(counters, edge):
         rec["different_haplotype"] += 1
 
 
+def _load_snv_assignment_counts(chrom_out_dir):
+    """
+    Load per-SNV assignment counts from haplotagged_snvs.tsv.
+    Returns counts over all filtered SNVs in this chromosome run.
+    """
+    counts = {"HP1": 0, "HP2": 0, "MIXED": 0, "UNKNOWN": 0}
+    path = os.path.join(chrom_out_dir, "haplotagged_snvs.tsv")
+    if not os.path.exists(path):
+        return counts
+
+    try:
+        with open(path, "r", newline="") as f:
+            reader = csv.DictReader(f, delimiter="\t")
+            for row in reader:
+                label = str(row.get("HP_ASSIGNMENT", "")).strip().upper()
+                if label in counts:
+                    counts[label] += 1
+                else:
+                    counts["UNKNOWN"] += 1
+    except Exception as exc:
+        print(f"[graph_ops] Warning: failed to parse {path}: {exc}")
+    return counts
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -92,6 +119,18 @@ def main():
         default=0,
         help="Total number of SNVs in the filtered VCF (for connectivity reporting).",
     )
+    parser.add_argument(
+        "--builder",
+        choices=("fast", "legacy"),
+        default="fast",
+        help="Graph consistency builder implementation to use.",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=int,
+        default=50000,
+        help="Print graph-build progress every N attempted edges; use 0 to disable.",
+    )
     args = parser.parse_args()
 
     chunk_dir = os.path.abspath(args.chunk_dir)
@@ -111,7 +150,9 @@ def main():
         print(f"[graph_ops] No chunk base files found in {chunk_dir}")
         return
 
-    print(f"[graph_ops] Found {len(bases)} chunk(s) in {chunk_dir}")
+    builder_cls = FastGraphBuilder if args.builder == "fast" else GraphBuilder
+    print(f"[graph_ops] Found {len(bases)} chunk(s) in {chunk_dir}", flush=True)
+    print(f"[graph_ops] Builder: {args.builder}", flush=True)
 
     all_relation_positions = set()
     all_graph_nodes = set()
@@ -122,17 +163,39 @@ def main():
 
     for base in bases:
         basename = os.path.basename(base)
-        print(f"[graph_ops] Processing chunk base: {basename}")
+        chunk_t0 = time.monotonic()
+        print(f"[graph_ops] Processing chunk base: {basename}", flush=True)
 
         edges = load_edges_from_base(base)
+        print(
+            f"[graph_ops]   loaded_sorted_edges={len(edges)} "
+            f"elapsed={time.monotonic() - chunk_t0:.3f}s",
+            flush=True,
+        )
 
         for e in edges:
             all_relation_positions.add(e.u)
             all_relation_positions.add(e.v)
 
-        builder = GraphBuilder()
-        for e in edges:
-            builder.try_add_edge(e)
+        builder = builder_cls()
+        build_t0 = time.monotonic()
+        accepted = 0
+        for idx, e in enumerate(edges, start=1):
+            if builder.try_add_edge(e):
+                accepted += 1
+            if args.progress_interval > 0 and idx % args.progress_interval == 0:
+                print(
+                    f"[graph_ops]   build_progress chunk={basename} "
+                    f"attempted={idx}/{len(edges)} accepted={accepted} "
+                    f"rejected={idx - accepted} elapsed={time.monotonic() - build_t0:.3f}s",
+                    flush=True,
+                )
+        print(
+            f"[graph_ops]   build_done chunk={basename} attempted={len(edges)} "
+            f"accepted={accepted} rejected={len(edges) - accepted} "
+            f"elapsed={time.monotonic() - build_t0:.3f}s",
+            flush=True,
+        )
 
         all_graph_nodes.update(builder.nodes)
         total_accepted_edges += len(builder.edges)
@@ -148,6 +211,7 @@ def main():
         log_path = os.path.join(outdir, f"{basename}_inconsistencies.tsv")
         accepted_path = os.path.join(outdir, f"{basename}_accepted_edges.txt")
 
+        export_t0 = time.monotonic()
         export_cytoscape_json(builder, json_path, name=basename)
         export_condensed_cytoscape_json(
             builder,
@@ -159,6 +223,11 @@ def main():
 
         rows = compute_component_statistics_rows(builder, chunk_base=basename)
         append_component_statistics_tsv(rows, component_stats_path)
+        print(
+            f"[graph_ops]   export_done chunk={basename} "
+            f"elapsed={time.monotonic() - export_t0:.3f}s",
+            flush=True,
+        )
 
         print(
             f"[graph_ops]   -> wrote graph JSON: {json_path}\n"
@@ -166,6 +235,8 @@ def main():
             f"inconsistencies: {log_path}\n"
             f"accepted edges: {accepted_path}\n"
             f"(nodes: {len(builder.nodes)}, edges: {len(builder.edges)})"
+            f"\nchunk_elapsed={time.monotonic() - chunk_t0:.3f}s",
+            flush=True,
         )
 
     # ---- Mutation connectivity statistics ----
@@ -175,6 +246,7 @@ def main():
     n_with_timing = len(all_timing_nodes)
     n_orphaned = n_in_relations - n_in_graph
     n_singleton = total_snvs - n_in_relations if total_snvs > 0 else 0
+    snv_hp_counts = _load_snv_assignment_counts(chrom_out_dir)
 
     def _pct(num, denom):
         return f"{100.0 * num / denom:.1f}%" if denom > 0 else "N/A"
@@ -203,6 +275,22 @@ def main():
             f"  Singleton (has no pairwise relations): {n_singleton}"
             f"  ({_pct(n_singleton, total_snvs)} of total)"
         )
+    lines.append(
+        f"  HP1 assigned:                         {snv_hp_counts['HP1']}"
+        + (f"  ({_pct(snv_hp_counts['HP1'], total_snvs)} of total)" if total_snvs > 0 else "")
+    )
+    lines.append(
+        f"  HP2 assigned:                         {snv_hp_counts['HP2']}"
+        + (f"  ({_pct(snv_hp_counts['HP2'], total_snvs)} of total)" if total_snvs > 0 else "")
+    )
+    lines.append(
+        f"  MIXED assigned:                       {snv_hp_counts['MIXED']}"
+        + (f"  ({_pct(snv_hp_counts['MIXED'], total_snvs)} of total)" if total_snvs > 0 else "")
+    )
+    lines.append(
+        f"  UNKNOWN assigned:                     {snv_hp_counts['UNKNOWN']}"
+        + (f"  ({_pct(snv_hp_counts['UNKNOWN'], total_snvs)} of total)" if total_snvs > 0 else "")
+    )
     lines.append(f"Total accepted edges:                  {total_accepted_edges}")
     lines.append(f"  - timing edges:                      {total_timing_edges}")
 
@@ -218,7 +306,11 @@ def main():
         f"orphaned={n_orphaned} "
         f"singleton={n_singleton} "
         f"accepted_edges={total_accepted_edges} "
-        f"timing_edges={total_timing_edges}"
+        f"timing_edges={total_timing_edges} "
+        f"hp1={snv_hp_counts['HP1']} "
+        f"hp2={snv_hp_counts['HP2']} "
+        f"mixed={snv_hp_counts['MIXED']} "
+        f"unknown={snv_hp_counts['UNKNOWN']}"
     )
     for relation in RELATIONS:
         rec = edge_haplotype_counters[relation]

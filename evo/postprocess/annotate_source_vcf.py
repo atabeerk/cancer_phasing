@@ -337,6 +337,9 @@ def find_vcf_files(vcf_dir: Path, recursive: bool) -> List[Path]:
     for p in vcf_dir.glob(pat):
         if not p.is_file():
             continue
+        # Ignore hidden files and macOS AppleDouble sidecars (for example ._foo.vcf.gz).
+        if p.name.startswith("."):
+            continue
         if p.name.endswith(".vcf") or p.name.endswith(".vcf.gz"):
             files.append(p)
     return sorted(files)

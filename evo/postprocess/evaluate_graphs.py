@@ -18,7 +18,9 @@ Node entries are expected to include:
   node["data"]["source_vcf"] = "N1.fixed.merged.withcontigs.sorted"
 We map SNV -> tree node label by taking the prefix before the first dot (e.g., "N1").
 
-Tree input is parent<TAB>child (no header).
+Tree input is headered TSV with at least:
+  parent<TAB>child
+Extra columns are allowed and ignored.
 
 Rules:
 - Timing edge A->B is CORRECT iff node(A) is a STRICT ancestor of node(B).
@@ -104,7 +106,11 @@ def nlabel_sort_key(n: str) -> Tuple[int, int, str]:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--outdir", required=True, help="Main output directory containing *_out folders.")
-    p.add_argument("--tree", required=True, help="Tree file (parent<TAB>child).")
+    p.add_argument(
+        "--tree",
+        required=True,
+        help="Tree file (headered TSV; first two columns must be parent<TAB>child).",
+    )
     p.add_argument("--out-prefix", default="edge_eval", help="Prefix for output files.")
     return p.parse_args()
 
@@ -114,6 +120,7 @@ def parse_args() -> argparse.Namespace:
 def read_tree_parent_child_tsv(path: Path) -> Tuple[Dict[str, str], Set[str]]:
     parent_of: Dict[str, str] = {}
     nodes: Set[str] = set()
+    seen_header = False
 
     with path.open("r", encoding="utf-8") as f:
         for line_no, line in enumerate(f, start=1):
@@ -121,8 +128,25 @@ def read_tree_parent_child_tsv(path: Path) -> Tuple[Dict[str, str], Set[str]]:
             if not line or line.startswith("#"):
                 continue
             parts = line.split("\t")
-            if len(parts) != 2:
-                raise ValueError(f"Tree parse error at line {line_no}: expected 2 tab-separated columns, got: {line!r}")
+
+            if not seen_header:
+                if len(parts) < 2:
+                    raise ValueError(
+                        f"Tree parse error at line {line_no}: expected header with at least 2 tab-separated columns, got: {line!r}"
+                    )
+                h0 = parts[0].strip().lower()
+                h1 = parts[1].strip().lower()
+                if h0 != "parent" or h1 != "child":
+                    raise ValueError(
+                        f"Tree parse error at line {line_no}: expected header starting with 'parent\\tchild', got: {line!r}"
+                    )
+                seen_header = True
+                continue
+
+            if len(parts) < 2:
+                raise ValueError(
+                    f"Tree parse error at line {line_no}: expected at least 2 tab-separated columns, got: {line!r}"
+                )
             parent, child = parts[0].strip(), parts[1].strip()
             if not parent or not child:
                 raise ValueError(f"Tree parse error at line {line_no}: empty parent/child in: {line!r}")
@@ -131,6 +155,9 @@ def read_tree_parent_child_tsv(path: Path) -> Tuple[Dict[str, str], Set[str]]:
             parent_of[child] = parent
             nodes.add(parent)
             nodes.add(child)
+
+    if not seen_header:
+        raise ValueError(f"Tree parse error: missing required header row in {path}")
 
     return parent_of, nodes
 

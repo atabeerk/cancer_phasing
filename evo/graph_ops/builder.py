@@ -338,6 +338,24 @@ class GraphBuilder:
 
         return True
 
+    def _check_cooccurring_merge_timing_acyclic(self, u: int, v: int, new_edge: Edge) -> bool:
+        """
+        Reject cooccurring merges between clusters that are already ordered by
+        timing, because contracting such clusters would create a cluster-level
+        directed timing cycle.
+        """
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+
+        fwd, _ = self._build_cluster_timing_graph()
+        if self._cluster_reachable(ru, rv, fwd) or self._cluster_reachable(rv, ru, fwd):
+            self._log_conflict(new_edge, None, "cluster_merge_timing_cycle")
+            return False
+        return True
+
     def _check_cluster_pair_relation_ok(self, u: int, v: int, new_edge: Edge) -> bool:
         """
         Enforce cluster-level consistency for non-cooccurring edges.
@@ -556,6 +574,8 @@ class GraphBuilder:
             if not self._check_cooccurring_merge_internal_consistency(u, v, edge):
                 return False
             if not self._check_cooccurring_merge_boundary_consistency(u, v, edge):
+                return False
+            if not self._check_cooccurring_merge_timing_acyclic(u, v, edge):
                 return False
 
         elif edge.relation == "timing":

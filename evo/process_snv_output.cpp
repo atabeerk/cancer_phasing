@@ -345,8 +345,8 @@ static inline float vaf_ratio(float v1, float v2) {
 
 // Piecewise linear: 1 until r0, then linearly to 0 at rmax.
 static inline float cooccurring_prior_from_ratio(float r) {
-    const float r0   = 1.15f;   // no coocc penalty until <=15% ratio diff
-    const float rmax = 1.50f;   // coocc prior -> 0 by 50% ratio diff
+    const float r0   = 1.0f;   // coocc penalty if vafs are different
+    const float rmax = 1.35f;   // coocc prior -> 0 by 35% ratio diff
 
     if (r <= r0) return 1.0f;
     if (r >= rmax) return 0.0f;
@@ -373,17 +373,20 @@ Classification classifyEntry(const SNPEntry& e, int minReads, float coverageScal
 
     const float p_co = clamp01(cooccurring_prior_from_ratio(r));
     const float p_tim = clamp01(eps + (1.0f - eps) * (1.0f - p_co));
+    const float prior_strength = 1.0f; // 0=no prior effect, 1=full prior effect
+    const float p_co_eff = 1.0f - prior_strength * (1.0f - p_co);
+    const float p_tim_eff = 1.0f - prior_strength * (1.0f - p_tim);
 
     // --- Apply priors (multiplicative) ---
     // Cooccurring gets boosted when VAFs are similar (p_co close to 1)
-    reliabilities["cooccurring"]      *= p_co;
-    reliabilities["cooccurring_loss"] *= p_co;
+    reliabilities["cooccurring"]      *= p_co_eff;
+    reliabilities["cooccurring_loss"] *= p_co_eff;
 
     // Timing gets punished when VAFs are similar
-    reliabilities["snp1_before_snp2"]      *= p_tim;
-    reliabilities["snp2_before_snp1"]      *= p_tim;
-    reliabilities["snp1_before_snp2_loss"] *= p_tim;
-    reliabilities["snp2_before_snp1_loss"] *= p_tim;
+    reliabilities["snp1_before_snp2"]      *= p_tim_eff;
+    reliabilities["snp2_before_snp1"]      *= p_tim_eff;
+    reliabilities["snp1_before_snp2_loss"] *= p_tim_eff;
+    reliabilities["snp2_before_snp1_loss"] *= p_tim_eff;
 
     // Find best and second-best pattern scores
     string best_type = "error";
