@@ -410,20 +410,37 @@ int main(int argc, char* argv[]) {
 
         for (int region_start = min_pos; region_start <= max_pos; region_start += chunk_size) {
             int region_end = region_start + chunk_size - 1;
+            int halo_start = std::max(1, region_start - max_pair_distance_bp);
+            int halo_end = region_end + max_pair_distance_bp;
 
-            // Extract SNVs in this region
-            std::vector<SNV> chunk_snvs;
+            // Extract the 10 Mb core plus a distance-sized halo. Pair ownership
+            // below is assigned to the chunk containing the lower-coordinate
+            // SNV, so every eligible pair is emitted exactly once.
+            std::vector<SNV> halo_snvs;
+            std::size_t core_snv_count = 0;
             for (const auto& s : sorted_snv_list) {
-                if (s.pos >= region_start && s.pos <= region_end)
-                    chunk_snvs.push_back(s);
+                if (s.pos >= halo_start && s.pos <= halo_end) {
+                    halo_snvs.push_back(s);
+                    if (s.pos >= region_start && s.pos <= region_end) {
+                        ++core_snv_count;
+                    }
+                }
             }
-            if (chunk_snvs.empty()) continue;
+            if (core_snv_count == 0) continue;
+
+            std::cout << "[chunk_halo] chrom=" << chrom
+                      << " core_start=" << region_start
+                      << " core_end=" << region_end
+                      << " halo_start=" << halo_start
+                      << " halo_end=" << halo_end
+                      << " core_snvs=" << core_snv_count
+                      << " halo_snvs=" << halo_snvs.size() << "\n";
 
             // --- Create BED/position file under pileup_files ---
             fs::path pos_file = pileupDir / ("positions_" + chrom + "_" + std::to_string(region_start) + ".txt");
             {
                 std::ofstream bed(pos_file);
-                for (const auto& s : chunk_snvs)
+                for (const auto& s : halo_snvs)
                     bed << s.chrom << "\t" << (s.pos - 1) << "\t" << s.pos << "\n";
             }
 
@@ -444,10 +461,10 @@ int main(int argc, char* argv[]) {
             }
 
             // --- Read mpileup output ---
-            auto pileup = readMpileup(mpileup_out, chunk_snvs);
+            auto pileup = readMpileup(mpileup_out, halo_snvs);
 
             // --- Precompute per-SNV HP labels/read counts once per chunk ---
-            for (auto& s : chunk_snvs) {
+            for (auto& s : halo_snvs) {
                 std::string key = s.chrom + ":" + std::to_string(s.pos);
                 auto it = pileup.find(key);
                 if (it != pileup.end()) {
@@ -467,19 +484,43 @@ int main(int argc, char* argv[]) {
 
             {
                 std::ofstream chunk_out(chunk_out_file);
-                for (size_t i = 0; i < chunk_snvs.size(); ++i) {
-                    for (size_t j = i + 1; j < chunk_snvs.size(); ++j) {
-                        if (chunk_snvs[j].pos - chunk_snvs[i].pos > max_pair_distance_bp) {
+                std::size_t owned_pairs = 0;
+                std::size_t compared_pairs = 0;
+                std::size_t cross_boundary_pairs = 0;
+
+                for (size_t i = 0; i < halo_snvs.size(); ++i) {
+                    // The lower-coordinate endpoint owns the pair. Restricting
+                    // it to this core prevents duplicates between halo windows.
+                    if (halo_snvs[i].pos < region_start || halo_snvs[i].pos > region_end) {
+                        continue;
+                    }
+
+                    for (size_t j = i + 1; j < halo_snvs.size(); ++j) {
+                        if (halo_snvs[j].pos - halo_snvs[i].pos > max_pair_distance_bp) {
                             break;
                         }
-                        std::string key1 = chunk_snvs[i].chrom + ":" + std::to_string(chunk_snvs[i].pos);
-                        std::string key2 = chunk_snvs[j].chrom + ":" + std::to_string(chunk_snvs[j].pos);
+                        ++owned_pairs;
+                        if (halo_snvs[j].pos > region_end) {
+                            ++cross_boundary_pairs;
+                        }
+
+                        std::string key1 = halo_snvs[i].chrom + ":" + std::to_string(halo_snvs[i].pos);
+                        std::string key2 = halo_snvs[j].chrom + ":" + std::to_string(halo_snvs[j].pos);
 
                         if (pileup.count(key1) && pileup.count(key2)) {
-                            compareSNVs(chunk_snvs[i], chunk_snvs[j], pileup[key1], pileup[key2], chunk_out);
+                            compareSNVs(halo_snvs[i], halo_snvs[j], pileup[key1], pileup[key2], chunk_out);
+                            ++compared_pairs;
                         }
                     }
                 }
+
+                std::cout << "[chunk_halo_pairs] chrom=" << chrom
+                          << " core_start=" << region_start
+                          << " core_end=" << region_end
+                          << " owned_distance_eligible=" << owned_pairs
+                          << " compared=" << compared_pairs
+                          << " cross_boundary_distance_eligible=" << cross_boundary_pairs
+                          << "\n";
             }
             
             processFile(chunk_out_file.string(), minReads);

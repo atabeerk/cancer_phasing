@@ -270,3 +270,36 @@ def find_chunk_bases(chunk_dir: str) -> List[str]:
 
     bases.sort()
     return bases
+
+
+def parse_chunk_base(base_path: str) -> Tuple[str, int, int]:
+    """Return ``(chromosome, core_start, core_end)`` for a chunk base path."""
+    basename = os.path.basename(base_path)
+    if not basename.startswith("chunk_"):
+        raise ValueError(f"Not a canonical chunk base: {base_path}")
+
+    payload = basename[len("chunk_"):]
+    try:
+        chrom, start_text, end_text = payload.rsplit("_", 2)
+        start = int(start_text)
+        end = int(end_text)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"Cannot parse chunk base: {base_path}") from exc
+
+    if not chrom or start > end:
+        raise ValueError(f"Invalid chunk base: {base_path}")
+    return chrom, start, end
+
+
+def group_chunk_bases_by_chromosome(
+    bases: List[str],
+) -> Dict[str, List[Tuple[str, int, int]]]:
+    """Group canonical chunk bases by chromosome and genomic core order."""
+    groups: Dict[str, List[Tuple[str, int, int]]] = {}
+    for base in bases:
+        chrom, start, end = parse_chunk_base(base)
+        groups.setdefault(chrom, []).append((base, start, end))
+
+    for records in groups.values():
+        records.sort(key=lambda rec: (rec[1], rec[2], rec[0]))
+    return dict(sorted(groups.items()))

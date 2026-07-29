@@ -3,12 +3,13 @@ import sys
 import argparse
 import csv
 import time
+from bisect import bisect_right
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-from parsing import find_chunk_bases, load_edges_from_base
+from parsing import find_chunk_bases, group_chunk_bases_by_chromosome, load_edges_from_base
 from builder import GraphBuilder
 from fast_builder import FastGraphBuilder
 from export_graph import export_cytoscape_json, export_condensed_cytoscape_json, write_inconsistency_log, write_accepted_edges
@@ -16,6 +17,66 @@ from component_stats import compute_component_statistics_rows, append_component_
 
 
 RELATIONS = ("cooccurring", "timing", "divergent")
+
+
+def _partition_component_rows(rows, chunk_records):
+    """
+    Start from the original consecutive batch ranges. If a connected component
+    crosses a batch end, extend that output region to the component's maximum
+    coordinate and start the next region at the following coordinate.
+    """
+    batch_ranges = sorted((int(start), int(end)) for _base, start, end in chunk_records)
+    if not batch_ranges:
+        return []
+
+    batch_ends = [end for _start, end in batch_ranges]
+    ordered_rows = sorted(
+        rows,
+        key=lambda row: (
+            int(row["min_pos"]),
+            int(row["max_pos"]),
+            int(row["component_id"]),
+        ),
+    )
+
+    partitions = []
+    row_index = 0
+    batch_index = 0
+    region_start = batch_ranges[0][0]
+
+    while batch_index < len(batch_ranges):
+        region_end = batch_ranges[batch_index][1]
+        partition_rows = []
+
+        # region_end may grow while rows are consumed. That closure ensures a
+        # whole component is kept and no later component begins inside a region
+        # assigned to an earlier file.
+        while (
+            row_index < len(ordered_rows)
+            and int(ordered_rows[row_index]["min_pos"]) <= region_end
+        ):
+            row = ordered_rows[row_index]
+            if int(row["min_pos"]) < region_start:
+                raise AssertionError("Connected component assigned to two regions")
+            partition_rows.append(row)
+            region_end = max(region_end, int(row["max_pos"]))
+            row_index += 1
+
+        partitions.append((region_start, region_end, partition_rows))
+        region_start = region_end + 1
+        batch_index = bisect_right(batch_ends, region_end)
+
+    if row_index != len(ordered_rows):
+        raise ValueError("Graph components extend beyond the final batch range")
+
+    return partitions
+
+
+def _component_partition_nodes(rows):
+    nodes = set()
+    for row in rows:
+        nodes.update(int(token) for token in str(row["nodes"]).split(",") if token)
+    return nodes
 
 
 def _new_edge_haplotype_counters():
@@ -99,9 +160,9 @@ def _load_snv_assignment_counts(chrom_out_dir):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Build consistent SNV graphs for all chunk files in a directory.\n"
+            "Build chromosome-level consistent SNV graphs from chunk files.\n"
             "Each chunk's per-relation files ( *_cooccurring.txt etc. ) must "
-            "already exist in the same directory."
+            "already exist in the same directory. All chromosome edges are globally sorted."
         )
     )
     parser.add_argument(
@@ -150,8 +211,13 @@ def main():
         print(f"[graph_ops] No chunk base files found in {chunk_dir}")
         return
 
+    chromosome_groups = group_chunk_bases_by_chromosome(bases)
+
     builder_cls = FastGraphBuilder if args.builder == "fast" else GraphBuilder
-    print(f"[graph_ops] Found {len(bases)} chunk(s) in {chunk_dir}", flush=True)
+    print(
+        f"[graph_ops] Found {len(bases)} chunk(s) across "
+        f"{len(chromosome_groups)} chromosome(s) in {chunk_dir}", flush=True
+    )
     print(f"[graph_ops] Builder: {args.builder}", flush=True)
 
     all_relation_positions = set()
@@ -161,21 +227,34 @@ def main():
     total_timing_edges = 0
     edge_haplotype_counters = _new_edge_haplotype_counters()
 
-    for base in bases:
-        basename = os.path.basename(base)
-        chunk_t0 = time.monotonic()
-        print(f"[graph_ops] Processing chunk base: {basename}", flush=True)
-
-        edges = load_edges_from_base(base)
+    for chrom, chunk_records in chromosome_groups.items():
+        chrom_t0 = time.monotonic()
+        core_start = min(record[1] for record in chunk_records)
+        core_end = max(record[2] for record in chunk_records)
+        basename = f"chunk_{chrom}_{core_start}_{core_end}"
         print(
-            f"[graph_ops]   loaded_sorted_edges={len(edges)} "
-            f"elapsed={time.monotonic() - chunk_t0:.3f}s",
+            f"[graph_ops] Processing chromosome: {chrom} "
+            f"chunks={len(chunk_records)} output_base={basename}", flush=True
+        )
+
+        edges = []
+        for base, _start, _end in chunk_records:
+            edges.extend(load_edges_from_base(base))
+        edges.sort(key=lambda e: e.reliability, reverse=True)
+        print(
+            f"[graph_ops]   loaded_globally_sorted_edges={len(edges)} "
+            f"elapsed={time.monotonic() - chrom_t0:.3f}s",
             flush=True,
         )
 
         for e in edges:
-            all_relation_positions.add(e.u)
-            all_relation_positions.add(e.v)
+            if e.chrom != chrom:
+                raise ValueError(
+                    f"Edge chromosome {e.chrom!r} does not match chunk chromosome {chrom!r}: "
+                    f"{e.source_file}"
+                )
+            all_relation_positions.add((e.chrom, e.u))
+            all_relation_positions.add((e.chrom, e.v))
 
         builder = builder_cls()
         build_t0 = time.monotonic()
@@ -185,57 +264,92 @@ def main():
                 accepted += 1
             if args.progress_interval > 0 and idx % args.progress_interval == 0:
                 print(
-                    f"[graph_ops]   build_progress chunk={basename} "
+                    f"[graph_ops]   build_progress chromosome={chrom} "
                     f"attempted={idx}/{len(edges)} accepted={accepted} "
                     f"rejected={idx - accepted} elapsed={time.monotonic() - build_t0:.3f}s",
                     flush=True,
                 )
         print(
-            f"[graph_ops]   build_done chunk={basename} attempted={len(edges)} "
+            f"[graph_ops]   build_done chromosome={chrom} attempted={len(edges)} "
             f"accepted={accepted} rejected={len(edges) - accepted} "
             f"elapsed={time.monotonic() - build_t0:.3f}s",
             flush=True,
         )
 
-        all_graph_nodes.update(builder.nodes)
+        all_graph_nodes.update((chrom, node) for node in builder.nodes)
         total_accepted_edges += len(builder.edges)
         for e in builder.edges:
             _update_edge_haplotype_counters(edge_haplotype_counters, e)
             if e.relation == "timing":
-                all_timing_nodes.add(e.u)
-                all_timing_nodes.add(e.v)
+                all_timing_nodes.add((e.chrom, e.u))
+                all_timing_nodes.add((e.chrom, e.v))
                 total_timing_edges += 1
 
-        json_path = os.path.join(outdir, f"{basename}.json")
-        condensed_json_path = os.path.join(outdir, f"{basename}_condensed.json")
         log_path = os.path.join(outdir, f"{basename}_inconsistencies.tsv")
         accepted_path = os.path.join(outdir, f"{basename}_accepted_edges.txt")
 
         export_t0 = time.monotonic()
-        export_cytoscape_json(builder, json_path, name=basename)
-        export_condensed_cytoscape_json(
-            builder,
-            condensed_json_path,
-            name=basename + "_condensed",
-        )
         write_inconsistency_log(builder, log_path)
         write_accepted_edges(builder, accepted_path)
 
-        rows = compute_component_statistics_rows(builder, chunk_base=basename)
-        append_component_statistics_tsv(rows, component_stats_path)
+        component_rows = compute_component_statistics_rows(
+            builder,
+            chunk_base=basename,
+            chromosome=chrom,
+        )
+        partitions = _partition_component_rows(component_rows, chunk_records)
+        partition_specs = []
+        for partition_start, partition_end, partition_rows in partitions:
+            partition_nodes = _component_partition_nodes(partition_rows)
+            partition_base = f"chunk_{chrom}_{partition_start}_{partition_end}"
+            partition_specs.append(
+                (partition_base, partition_nodes, partition_rows)
+            )
+
+        partition_paths = []
+
+        for partition_base, partition_nodes, partition_rows in partition_specs:
+            json_path = os.path.join(outdir, f"{partition_base}.json")
+            condensed_json_path = os.path.join(
+                outdir,
+                f"{partition_base}_condensed.json",
+            )
+
+            export_cytoscape_json(
+                builder,
+                json_path,
+                name=partition_base,
+                node_subset=partition_nodes,
+            )
+            export_condensed_cytoscape_json(
+                builder,
+                condensed_json_path,
+                name=partition_base + "_condensed",
+                node_subset=partition_nodes,
+            )
+
+            stats_rows = []
+            for component_id, row in enumerate(partition_rows):
+                output_row = dict(row)
+                output_row["chunk_base"] = partition_base
+                output_row["component_id"] = component_id
+                stats_rows.append(output_row)
+            append_component_statistics_tsv(stats_rows, component_stats_path)
+            partition_paths.append((json_path, condensed_json_path))
+
         print(
-            f"[graph_ops]   export_done chunk={basename} "
+            f"[graph_ops]   export_done chromosome={chrom} "
+            f"json_partitions={len(partition_paths)} "
             f"elapsed={time.monotonic() - export_t0:.3f}s",
             flush=True,
         )
 
         print(
-            f"[graph_ops]   -> wrote graph JSON: {json_path}\n"
-            f"condensed JSON: {condensed_json_path}\n"
+            f"[graph_ops]   -> wrote {len(partition_paths)} paired graph JSON partition(s)\n"
             f"inconsistencies: {log_path}\n"
             f"accepted edges: {accepted_path}\n"
             f"(nodes: {len(builder.nodes)}, edges: {len(builder.edges)})"
-            f"\nchunk_elapsed={time.monotonic() - chunk_t0:.3f}s",
+            f"\nchromosome_elapsed={time.monotonic() - chrom_t0:.3f}s",
             flush=True,
         )
 

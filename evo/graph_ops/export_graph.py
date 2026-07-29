@@ -3,7 +3,7 @@
 import json
 import csv
 from collections import Counter
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from builder import GraphBuilder
 
@@ -105,6 +105,7 @@ def export_cytoscape_json(
     builder: GraphBuilder,
     out_path: str,
     name: Optional[str] = None,
+    node_subset: Optional[Set[int]] = None,
 ) -> None:
     """
     Export the graph to a Cytoscape-compatible JSON file.
@@ -138,7 +139,16 @@ def export_cytoscape_json(
     if name is None:
         name = "chunk_graph"
 
-    sorted_nodes = sorted(builder.nodes)
+    selected_nodes = (
+        set(builder.nodes)
+        if node_subset is None
+        else set(builder.nodes) & set(node_subset)
+    )
+    selected_edges = [
+        e for e in builder.edges
+        if e.u in selected_nodes and e.v in selected_nodes
+    ]
+    sorted_nodes = sorted(selected_nodes)
     node_x_sort = {pos: float(pos) for pos in sorted_nodes}
     node_y_sort = {
         pos: float(builder.node_vaf[pos]) if builder.node_vaf.get(pos) is not None else 0.0
@@ -146,7 +156,7 @@ def export_cytoscape_json(
     }
     uncondensed_positions = _component_layout_positions(
         node_ids=sorted_nodes,
-        edges=((e.u, e.v) for e in builder.edges),
+        edges=((e.u, e.v) for e in selected_edges),
         node_x_sort=node_x_sort,
         node_y_sort=node_y_sort,
     )
@@ -172,7 +182,7 @@ def export_cytoscape_json(
 
     # Edges with directed flag and read counts / label
     edges_json = []
-    for idx, e in enumerate(builder.edges):
+    for idx, e in enumerate(selected_edges):
         edge_id = f"{e.u}-{e.v}-{idx}"
 
         # Build "x/y/z/t" read count string
@@ -208,6 +218,7 @@ def export_condensed_cytoscape_json(
     builder: GraphBuilder,
     out_path: str,
     name: Optional[str] = None,
+    node_subset: Optional[Set[int]] = None,
 ) -> None:
     """
     Export a condensed graph where:
@@ -259,12 +270,22 @@ def export_condensed_cytoscape_json(
     if name is None:
         name = "chunk_graph_condensed"
 
+    selected_nodes = (
+        set(builder.nodes)
+        if node_subset is None
+        else set(builder.nodes) & set(node_subset)
+    )
+    selected_edges = [
+        e for e in builder.edges
+        if e.u in selected_nodes and e.v in selected_nodes
+    ]
+
     # ---- Build cluster mapping ----
     # builder.cluster_nodes: rep -> set(nodes)  (union–find components)
     # builder.nodes: SNVs that actually appear in accepted edges. :contentReference[oaicite:4]{index=4} :contentReference[oaicite:5]{index=5}
     clusters_used = {}
     for rep, members in builder.cluster_nodes.items():
-        used = members & builder.nodes
+        used = members & selected_nodes
         if used:
             clusters_used[rep] = used
 
@@ -332,7 +353,7 @@ def export_condensed_cytoscape_json(
     # For divergent edges, treat as undirected (canonical ordering).
     agg_edges = {}
 
-    for e in builder.edges:  # accepted edges only :contentReference[oaicite:6]{index=6}
+    for e in selected_edges:  # accepted edges only :contentReference[oaicite:6]{index=6}
         if e.relation == "cooccurring":
             continue  # internal to clusters in the condensed view
 
