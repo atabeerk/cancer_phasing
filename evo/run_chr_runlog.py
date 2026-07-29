@@ -28,6 +28,9 @@ def write_run_header(
     require_pass_filter,
     chromosomes,
     genome_bp,
+    detected_chromosome_count=None,
+    excluded_chroms=None,
+    excluded_detected_chromosomes=None,
 ):
     run_log.write(
         f"Run started (local): {run_start_wall.strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -50,6 +53,13 @@ def write_run_header(
     run_log.write(f"vcf_pass_records_found={pass_vcf_records}\n")
     run_log.write(f"vcf_require_filter_PASS={int(require_pass_filter)}\n")
     run_log.write("parallel_mode=chromosome_thread_pool\n")
+    if detected_chromosome_count is not None:
+        run_log.write(f"Detected chromosomes before exclusion: {detected_chromosome_count}\n")
+    if excluded_chroms:
+        requested = ",".join(sorted(excluded_chroms))
+        matched = ",".join(chrom for chrom, _ in (excluded_detected_chromosomes or [])) or "none"
+        run_log.write(f"Excluded chromosomes requested: {requested}\n")
+        run_log.write(f"Excluded chromosomes found in BAM: {matched}\n")
     run_log.write(f"Detected chromosomes: {len(chromosomes)}\n")
     run_log.write(f"Genome bp (selected chromosomes): {genome_bp}\n")
     run_log.write(

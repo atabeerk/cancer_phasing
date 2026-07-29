@@ -6,7 +6,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from run_chr_cli import parse_args, preflight_requirements
+from run_chr_cli import (
+    chrom_is_excluded,
+    parse_args,
+    parse_exclude_chroms,
+    preflight_requirements,
+)
 from run_chr_log_stats import (
     add_edge_haplotype_summary,
     new_edge_haplotype_summary,
@@ -84,6 +89,7 @@ def main():
     post_cn_bed_hp1 = args.cn_bed_hp1
     post_cn_bed_hp2 = args.cn_bed_hp2
     post_tree = args.tree
+    excluded_chroms = parse_exclude_chroms(args.exclude_chrom)
 
     main_program = "./main"
 
@@ -111,8 +117,25 @@ def main():
 
     # Build the chromosome task list and initialize genome-level accumulators.
     print("Extracting chromosome list from BAM header using samtools...")
-    chromosomes = get_chromosomes_from_bam(bam_path)
-    print(f"Detected {len(chromosomes)} chromosomes.")
+    detected_chromosomes = get_chromosomes_from_bam(bam_path)
+    chromosomes = [
+        (chrom, length)
+        for chrom, length in detected_chromosomes
+        if not chrom_is_excluded(chrom, excluded_chroms)
+    ]
+    excluded_detected_chromosomes = [
+        (chrom, length)
+        for chrom, length in detected_chromosomes
+        if chrom_is_excluded(chrom, excluded_chroms)
+    ]
+    print(f"Detected {len(detected_chromosomes)} chromosomes.")
+    if excluded_chroms:
+        requested = ", ".join(sorted(excluded_chroms))
+        matched = ", ".join(chrom for chrom, _ in excluded_detected_chromosomes) or "none"
+        print(f"Excluded chromosomes requested: {requested}")
+        print(f"Excluded chromosomes found in BAM: {matched}")
+    if not chromosomes:
+        sys.exit("Error: no chromosomes left after applying --exclude-chrom.")
     genome_bp = sum(length for _, length in chromosomes)
     total_component_bp_summed = 0
     total_component_bp_unique = 0
@@ -165,6 +188,9 @@ def main():
             require_pass_filter=require_pass_filter,
             chromosomes=chromosomes,
             genome_bp=genome_bp,
+            detected_chromosome_count=len(detected_chromosomes),
+            excluded_chroms=excluded_chroms,
+            excluded_detected_chromosomes=excluded_detected_chromosomes,
         )
         run_log.flush()
 

@@ -6,6 +6,27 @@ import shutil
 import subprocess
 
 
+def normalize_chrom_name(chrom):
+    chrom = str(chrom).strip()
+    if chrom.lower().startswith("chr"):
+        chrom = chrom[3:]
+    return chrom.upper()
+
+
+def parse_exclude_chroms(values):
+    excluded = set()
+    for value in values or []:
+        for chrom in value.split(","):
+            chrom = chrom.strip()
+            if chrom:
+                excluded.add(normalize_chrom_name(chrom))
+    return excluded
+
+
+def chrom_is_excluded(chrom, excluded_chroms):
+    return normalize_chrom_name(chrom) in excluded_chroms
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
@@ -22,6 +43,15 @@ def parse_args():
         type=int,
         default=1,
         help="Number of chromosomes to process in parallel (default: 1)",
+    )
+    parser.add_argument(
+        "--exclude-chrom",
+        action="append",
+        default=[],
+        help=(
+            "Chromosome to exclude from processing. Can be repeated or comma-separated; "
+            "chr prefixes are optional, e.g. --exclude-chrom chr7 --exclude-chrom 9."
+        ),
     )
     # Optional pass-through arguments for postprocessing.
     parser.add_argument("--vcfs", type=str, default=None, help="Postprocess: VCF directory for source annotation.")
