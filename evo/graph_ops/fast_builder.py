@@ -307,6 +307,55 @@ class FastGraphBuilder:
             return False
         return True
 
+    def _has_divergent_ancestor_reaching_descendants(
+        self,
+        ancestor_bits: int,
+        descendant_bits: int,
+    ) -> bool:
+        """Whether an ancestor's divergent peer reaches any target descendant."""
+        for ancestor in self._bits_to_active_reps(ancestor_bits):
+            divergent_bits = self.divergent_neighbors[ancestor]
+            for other in self._bits_to_active_reps(divergent_bits):
+                other_descendants = self.cluster_reach[other] | self.member_bits[other]
+                if other_descendants & descendant_bits:
+                    return True
+        return False
+
+    def _check_cooccurring_merge_divergent_shared_descendant(
+        self,
+        u: int,
+        v: int,
+        new_edge: Edge,
+    ) -> bool:
+        """Reject a merge that gives divergent clusters a common descendant."""
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+
+        ancestors_u = self.cluster_rev_reach[ru] | self.member_bits[ru]
+        ancestors_v = self.cluster_rev_reach[rv] | self.member_bits[rv]
+        descendants_u = self.cluster_reach[ru] | self.member_bits[ru]
+        descendants_v = self.cluster_reach[rv] | self.member_bits[rv]
+        if (
+            self._has_divergent_ancestor_reaching_descendants(
+                ancestors_u,
+                descendants_v,
+            )
+            or self._has_divergent_ancestor_reaching_descendants(
+                ancestors_v,
+                descendants_u,
+            )
+        ):
+            self._log_conflict(
+                new_edge,
+                None,
+                "cluster_merge_divergent_shared_timing_descendant_conflict",
+            )
+            return False
+        return True
+
     def _check_cluster_pair_relation_ok(self, u: int, v: int, new_edge: Edge) -> bool:
         self._ensure_node_dsu(u)
         self._ensure_node_dsu(v)
@@ -338,6 +387,13 @@ class FastGraphBuilder:
         if self._cluster_reachable_by_rep(ru, rv) or self._cluster_reachable_by_rep(rv, ru):
             self._log_conflict(new_edge, None, "cluster_pair_divergent_timing_transitive_conflict")
             return False
+        if self.cluster_reach[ru] & self.cluster_reach[rv]:
+            self._log_conflict(
+                new_edge,
+                None,
+                "cluster_pair_divergent_shared_timing_descendant_conflict",
+            )
+            return False
         return True
 
     def _check_timing_not_imply_divergent_conflict(self, u: int, v: int, new_edge: Edge) -> bool:
@@ -353,6 +409,13 @@ class FastGraphBuilder:
             if self.divergent_neighbors[ancestor] & desc_bits:
                 self._log_conflict(new_edge, None, "cluster_pair_timing_implies_divergent_transitive_conflict")
                 return False
+        if self._has_divergent_ancestor_reaching_descendants(anc_bits, desc_bits):
+            self._log_conflict(
+                new_edge,
+                None,
+                "cluster_pair_divergent_shared_timing_descendant_conflict",
+            )
+            return False
         return True
 
     # -------- Index updates --------
@@ -515,6 +578,8 @@ class FastGraphBuilder:
             if not self._check_cooccurring_merge_boundary_consistency(u, v, edge):
                 return False
             if not self._check_cooccurring_merge_timing_acyclic(u, v, edge):
+                return False
+            if not self._check_cooccurring_merge_divergent_shared_descendant(u, v, edge):
                 return False
         elif edge.relation == "timing":
             if ru == rv:

@@ -15,6 +15,7 @@ class GraphBuilder:
       - only one relation type per unordered pair of nodes
       - cooccurring clusters may contain only cooccurring edges internally
       - timing edges form an acyclic directed graph
+      - divergent cooccurring clusters may not share a timing descendant
       - nodes in the same cooccurring cluster may not have timing/divergent edges between them
       - between any two cooccurring clusters, accepted non-cooccurring edges must
         agree on a single relation mode:
@@ -351,6 +352,45 @@ class GraphBuilder:
             return False
         return True
 
+    def _check_cooccurring_merge_divergent_shared_descendant(
+        self,
+        u: int,
+        v: int,
+        new_edge: Edge,
+    ) -> bool:
+        """Reject a merge that gives divergent clusters a common descendant."""
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+
+        fwd, rev = self._build_cluster_timing_graph()
+        ancestors_u = self._collect_cluster_reach(ru, rev)
+        ancestors_v = self._collect_cluster_reach(rv, rev)
+        descendants_u = self._collect_cluster_reach(ru, fwd)
+        descendants_v = self._collect_cluster_reach(rv, fwd)
+
+        if (
+            self._has_divergent_ancestor_reaching_descendants(
+                ancestors_u,
+                descendants_v,
+                fwd,
+            )
+            or self._has_divergent_ancestor_reaching_descendants(
+                ancestors_v,
+                descendants_u,
+                fwd,
+            )
+        ):
+            self._log_conflict(
+                new_edge,
+                None,
+                "cluster_merge_divergent_shared_timing_descendant_conflict",
+            )
+            return False
+        return True
+
     def _check_cluster_pair_relation_ok(self, u: int, v: int, new_edge: Edge) -> bool:
         """
         Enforce cluster-level consistency for non-cooccurring edges.
@@ -472,10 +512,28 @@ class GraphBuilder:
             pairs.add((ru, rv) if ru <= rv else (rv, ru))
         return pairs
 
+    def _has_divergent_ancestor_reaching_descendants(
+        self,
+        ancestors: Set[int],
+        descendants: Set[int],
+        fwd: Dict[int, Set[int]],
+    ) -> bool:
+        """Whether an ancestor's divergent peer reaches any target descendant."""
+        reach_cache: Dict[int, Set[int]] = {}
+        for a, b in self._build_cluster_divergent_pairs():
+            other = b if a in ancestors else a if b in ancestors else None
+            if other is None:
+                continue
+            if other not in reach_cache:
+                reach_cache[other] = self._collect_cluster_reach(other, fwd)
+            if reach_cache[other] & descendants:
+                return True
+        return False
+
     def _check_divergent_not_ordered_by_timing(self, u: int, v: int, new_edge: Edge) -> bool:
         """
         Reject divergent edges when clusters are already timing-ordered
-        (directly or transitively) in either direction.
+        in either direction or share a direct/transitive timing descendant.
         """
         self._ensure_node_dsu(u)
         self._ensure_node_dsu(v)
@@ -487,13 +545,21 @@ class GraphBuilder:
         if self._cluster_reachable(ru, rv, fwd) or self._cluster_reachable(rv, ru, fwd):
             self._log_conflict(new_edge, None, "cluster_pair_divergent_timing_transitive_conflict")
             return False
+        descendants_u = self._collect_cluster_reach(ru, fwd) - {ru}
+        descendants_v = self._collect_cluster_reach(rv, fwd) - {rv}
+        if descendants_u & descendants_v:
+            self._log_conflict(
+                new_edge,
+                None,
+                "cluster_pair_divergent_shared_timing_descendant_conflict",
+            )
+            return False
         return True
 
     def _check_timing_not_imply_divergent_conflict(self, u: int, v: int, new_edge: Edge) -> bool:
         """
-        Reject a timing edge u->v if, after adding it at cluster level, any
-        ancestor of cluster(u) can reach any descendant of cluster(v) where that
-        ancestor/descendant cluster pair is already connected by a divergent edge.
+        Reject a timing edge u->v if it would timing-order a divergent pair
+        or give a divergent pair a shared direct/transitive timing descendant.
         """
         self._ensure_node_dsu(u)
         self._ensure_node_dsu(v)
@@ -517,6 +583,17 @@ class GraphBuilder:
                 if key in divergent_pairs:
                     self._log_conflict(new_edge, None, "cluster_pair_timing_implies_divergent_transitive_conflict")
                     return False
+        if self._has_divergent_ancestor_reaching_descendants(
+            ancestors,
+            descendants,
+            fwd,
+        ):
+            self._log_conflict(
+                new_edge,
+                None,
+                "cluster_pair_divergent_shared_timing_descendant_conflict",
+            )
+            return False
         return True
 
     # -------- Public API --------
@@ -572,6 +649,8 @@ class GraphBuilder:
                 return False
             if not self._check_cooccurring_merge_timing_acyclic(u, v, edge):
                 return False
+            if not self._check_cooccurring_merge_divergent_shared_descendant(u, v, edge):
+                return False
 
         elif edge.relation == "timing":
             # No timing edges within a cooccurring cluster
@@ -611,8 +690,8 @@ class GraphBuilder:
             if not self._check_cluster_pair_relation_ok(u, v, edge):
                 return False
 
-            # Disallow divergent edges between clusters that are already ordered
-            # by timing via any directed path.
+            # Disallow divergent edges between clusters that are timing-ordered
+            # or share a direct/transitive timing descendant.
             if not self._check_divergent_not_ordered_by_timing(u, v, edge):
                 return False
 
