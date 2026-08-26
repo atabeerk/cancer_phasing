@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Run postprocessing steps on main output:
-  1) annotate_source_vcf (optional; if --vcfs and/or --cn-bed-hp1/--cn-bed-hp2)
+  1) annotate_source_vcf (optional; if --vcfs and/or --cn-bed)
   2) report_condensed_timing_chains (always)
   3) evaluate_graphs (optional; if --tree)
   4) plot_edge_eval_vcfpair_heatmap (optional; if --tree)
@@ -66,23 +66,19 @@ def main() -> None:
     )
     parser.add_argument("--outdir", required=True, type=Path, help="Main output directory.")
     parser.add_argument("--vcfs", type=Path, default=None, help="VCF directory for source annotation.")
-    parser.add_argument("--cn-bed-hp1", type=Path, default=None, help="HP1 copy-number BED.")
-    parser.add_argument("--cn-bed-hp2", type=Path, default=None, help="HP2 copy-number BED.")
+    parser.add_argument(
+        "--cn-bed",
+        type=Path,
+        default=None,
+        help="Wakhan integer_profile.bed containing HP1 and HP2 copy number.",
+    )
     parser.add_argument("--tree", type=Path, default=None, help="Parent-child TSV for evaluation.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands and exit.")
     args = parser.parse_args()
 
     has_vcfs = args.vcfs is not None
     has_tree = args.tree is not None
-    has_cn_pair = args.cn_bed_hp1 is not None and args.cn_bed_hp2 is not None
-    has_partial_cn = (args.cn_bed_hp1 is None) != (args.cn_bed_hp2 is None)
-    if has_partial_cn:
-        print(
-            "Warning: only one CN BED argument was provided; "
-            "CN-dependent postprocessing will be skipped. "
-            "Provide both --cn-bed-hp1 and --cn-bed-hp2 to enable CN overlays/annotation.",
-            file=sys.stderr,
-        )
+    has_cn = args.cn_bed is not None
 
     postprocess_dir = Path(__file__).resolve().parent
     evo_dir = postprocess_dir.parent
@@ -97,13 +93,12 @@ def main() -> None:
     outdir = args.outdir.resolve()
     steps: list[tuple[str, list[str]]] = []
 
-    if has_vcfs or has_cn_pair:
+    if has_vcfs or has_cn:
         cmd = [sys.executable, str(annotate_script), "--main_out", str(outdir)]
         if has_vcfs:
             cmd.extend(["--vcfs", str(args.vcfs.resolve())])
-        if has_cn_pair:
-            cmd.extend(["--cn-bed-hp1", str(args.cn_bed_hp1.resolve())])
-            cmd.extend(["--cn-bed-hp2", str(args.cn_bed_hp2.resolve())])
+        if has_cn:
+            cmd.extend(["--cn-bed", str(args.cn_bed.resolve())])
         steps.append(("annotate_source_vcf", cmd))
 
     steps.append(("report_condensed_timing_chains", [sys.executable, str(timing_script), "--outdir", str(outdir)]))
@@ -133,9 +128,8 @@ def main() -> None:
     steps.append(("summarize_and_compress", [sys.executable, str(summarize_script), str(outdir)]))
 
     interactive_cmd = [sys.executable, str(interactive_plot_script), "--outdir", str(outdir)]
-    if has_cn_pair:
-        interactive_cmd.extend(["--cn-bed-hp1", str(args.cn_bed_hp1.resolve())])
-        interactive_cmd.extend(["--cn-bed-hp2", str(args.cn_bed_hp2.resolve())])
+    if has_cn:
+        interactive_cmd.extend(["--cn-bed", str(args.cn_bed.resolve())])
     steps.append(("plot_timing_cn_interactive", interactive_cmd))
 
     steps.append(

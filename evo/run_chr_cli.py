@@ -99,8 +99,12 @@ def parse_args():
     )
     # Optional pass-through arguments for postprocessing.
     parser.add_argument("--vcfs", type=str, default=None, help="Postprocess: VCF directory for source annotation.")
-    parser.add_argument("--cn-bed-hp1", type=str, default=None, help="Postprocess: HP1 copy-number BED.")
-    parser.add_argument("--cn-bed-hp2", type=str, default=None, help="Postprocess: HP2 copy-number BED.")
+    parser.add_argument(
+        "--cn-bed",
+        type=str,
+        default=None,
+        help="Postprocess: Wakhan integer_profile.bed containing HP1 and HP2 copy number.",
+    )
     parser.add_argument("--tree", type=str, default=None, help="Postprocess: parent-child TSV for evaluation.")
 
     args = parser.parse_args()

@@ -94,8 +94,7 @@ def main():
     divergent_same_hp = args.divergent_same_hp
     jobs = args.jobs
     post_vcfs = args.vcfs
-    post_cn_bed_hp1 = args.cn_bed_hp1
-    post_cn_bed_hp2 = args.cn_bed_hp2
+    post_cn_bed = args.cn_bed
     post_tree = args.tree
     excluded_chroms = parse_exclude_chroms(args.exclude_chrom)
 
@@ -388,9 +387,8 @@ def main():
     post_cmd = [sys.executable, postprocess_script, "--outdir", outdir]
     if post_vcfs:
         post_cmd.extend(["--vcfs", os.path.abspath(post_vcfs)])
-    if post_cn_bed_hp1 and post_cn_bed_hp2:
-        post_cmd.extend(["--cn-bed-hp1", os.path.abspath(post_cn_bed_hp1)])
-        post_cmd.extend(["--cn-bed-hp2", os.path.abspath(post_cn_bed_hp2)])
+    if post_cn_bed:
+        post_cmd.extend(["--cn-bed", os.path.abspath(post_cn_bed)])
     if post_tree:
         post_cmd.extend(["--tree", os.path.abspath(post_tree)])
 

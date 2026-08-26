@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Interactive timing plot:
-  - With CN BEDs:
+  - With a dual-haplotype Wakhan CN BED:
       Top panel shows CN tracks, timing chains, rank markers, chain>maxCN alerts.
       Bottom panel shows circle-only distribution by CN state.
   - Without CN BEDs:
@@ -135,29 +135,43 @@ def parse_members(raw: object) -> List[int]:
     return out
 
 
-def load_cn_segments(cn_bed: Path) -> Dict[str, List[CnSegment]]:
-    by_chrom: Dict[str, List[CnSegment]] = {}
+def load_dual_haplotype_cn_segments(
+    cn_bed: Path,
+) -> Tuple[Dict[str, List[CnSegment]], Dict[str, List[CnSegment]]]:
+    hp1_by_chrom: Dict[str, List[CnSegment]] = {}
+    hp2_by_chrom: Dict[str, List[CnSegment]] = {}
     with cn_bed.open("rt", encoding="utf-8", errors="replace") as f:
         for line in f:
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
             parts = s.split("\t")
-            if len(parts) < 5:
+            if len(parts) < 9:
                 continue
             try:
-                start = int(parts[1])
-                end = int(parts[2])
+                bed_start = int(parts[1])
+                bed_end = int(parts[2])
             except ValueError:
                 continue
-            if end < start:
+            if bed_end <= bed_start:
                 continue
+            # Convert BED [start,end) coordinates to one-based closed
+            # coordinates used by mutation and timing-chain positions.
+            start = bed_start + 1
+            end = bed_end
             chrom = canonical_chrom(parts[0])
-            cn = parse_float_or_nan(parts[4])
-            by_chrom.setdefault(chrom, []).append(CnSegment(chrom, start, end, cn))
-    for c in by_chrom:
-        by_chrom[c].sort(key=lambda x: (x.start, x.end))
-    return by_chrom
+            hp1_cn = parse_float_or_nan(parts[4])
+            hp2_cn = parse_float_or_nan(parts[7])
+            hp1_by_chrom.setdefault(chrom, []).append(
+                CnSegment(chrom, start, end, hp1_cn)
+            )
+            hp2_by_chrom.setdefault(chrom, []).append(
+                CnSegment(chrom, start, end, hp2_cn)
+            )
+    for by_chrom in (hp1_by_chrom, hp2_by_chrom):
+        for chrom in by_chrom:
+            by_chrom[chrom].sort(key=lambda x: (x.start, x.end))
+    return hp1_by_chrom, hp2_by_chrom
 
 
 def _sum_cn(cn1: float, cn2: float) -> Optional[float]:
@@ -2178,24 +2192,27 @@ def main() -> None:
         description="Create interactive genome-wide timing plot (with optional CN tracks)."
     )
     ap.add_argument("--outdir", required=True, type=Path, help="Main output directory.")
-    ap.add_argument("--cn-bed-hp1", type=Path, default=None, help="HP1 CN BED (optional).")
-    ap.add_argument("--cn-bed-hp2", type=Path, default=None, help="HP2 CN BED (optional).")
+    ap.add_argument(
+        "--cn-bed",
+        type=Path,
+        default=None,
+        help="Wakhan integer_profile.bed containing HP1 and HP2 CN (optional).",
+    )
     ap.add_argument("--timing-tsv", type=Path, default=None, help="Timing chains TSV (default: <outdir>/timing_chains.tsv).")
     ap.add_argument("--min-chain-len", type=int, default=3, help="Minimum chain length to include.")
     ap.add_argument("--title", type=str, default="Genome-wide copy number and timing chains", help="Plot title.")
     args = ap.parse_args()
 
     outdir = args.outdir.resolve()
-    if (args.cn_bed_hp1 is None) != (args.cn_bed_hp2 is None):
-        raise SystemExit("Provide both --cn-bed-hp1 and --cn-bed-hp2 together, or neither.")
-    has_cn = args.cn_bed_hp1 is not None and args.cn_bed_hp2 is not None
+    has_cn = args.cn_bed is not None
     timing_tsv = args.timing_tsv.resolve() if args.timing_tsv else (outdir / "timing_chains.tsv")
     ranks_tsv = outdir / "node_ranks.tsv"
     out_html = outdir / "timing_cn_interactive.html"
 
     if has_cn:
-        cn_hp1 = load_cn_segments(args.cn_bed_hp1.resolve())
-        cn_hp2 = load_cn_segments(args.cn_bed_hp2.resolve())
+        cn_hp1, cn_hp2 = load_dual_haplotype_cn_segments(
+            args.cn_bed.resolve()
+        )
         cn_total = build_total_cn_segments(cn_hp1, cn_hp2)
         cn_max = build_max_cn_segments(cn_hp1, cn_hp2)
     else:
@@ -2249,4 +2266,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

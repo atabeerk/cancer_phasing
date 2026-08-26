@@ -64,14 +64,24 @@ def _to_float_or_nan(x: str) -> float:
         return float("nan")
 
 
-def load_cn_segments_by_chrom(cn_bed_path: Path) -> Tuple[Dict[str, List[CnSegment]], int, int]:
+def load_dual_haplotype_cn_segments_by_chrom(
+    cn_bed_path: Path,
+) -> Tuple[
+    Dict[str, List[CnSegment]],
+    Dict[str, List[CnSegment]],
+    int,
+    int,
+]:
     """
-    Load CN segments from a tab-delimited BED-like file.
+    Load both haplotype CN tracks from a Wakhan integer_profile.bed file.
     Expected columns:
-      chr, start, end, coverage, copynumber_state, confidence, ...
+      chr, start, end,
+      hp1_coverage, hp1_copynumber_state, hp1_confidence,
+      hp2_coverage, hp2_copynumber_state, hp2_confidence, ...
     Header/comment lines starting with '#' are skipped.
     """
-    by_chrom: Dict[str, List[CnSegment]] = {}
+    hp1_by_chrom: Dict[str, List[CnSegment]] = {}
+    hp2_by_chrom: Dict[str, List[CnSegment]] = {}
     total_rows = 0
     kept_rows = 0
 
@@ -82,8 +92,8 @@ def load_cn_segments_by_chrom(cn_bed_path: Path) -> Tuple[Dict[str, List[CnSegme
                 continue
             total_rows += 1
             parts = s.split("\t")
-            if len(parts) < 6:
-                print(f"[cn_bed] Skipping malformed row {line_no}: expected >=6 columns, got {len(parts)}")
+            if len(parts) < 9:
+                print(f"[cn_bed] Skipping malformed row {line_no}: expected >=9 columns, got {len(parts)}")
                 continue
 
             chrom_raw = parts[0].strip()
@@ -93,16 +103,24 @@ def load_cn_segments_by_chrom(cn_bed_path: Path) -> Tuple[Dict[str, List[CnSegme
             chrom = canonical_chrom(chrom_raw)
 
             try:
-                start = int(parts[1])
-                end = int(parts[2])
+                bed_start = int(parts[1])
+                bed_end = int(parts[2])
             except ValueError:
                 print(f"[cn_bed] Skipping row {line_no}: non-integer start/end")
                 continue
-            if end < start:
-                print(f"[cn_bed] Skipping row {line_no}: end < start ({start}, {end})")
+            if bed_end <= bed_start:
+                print(
+                    f"[cn_bed] Skipping row {line_no}: end <= start "
+                    f"({bed_start}, {bed_end})"
+                )
                 continue
 
-            seg = CnSegment(
+            # BED is zero-based and end-exclusive; graph/VCF positions are
+            # one-based. Convert [bed_start, bed_end) to [start, end].
+            start = bed_start + 1
+            end = bed_end
+
+            hp1_seg = CnSegment(
                 chrom=chrom,
                 start=start,
                 end=end,
@@ -110,13 +128,23 @@ def load_cn_segments_by_chrom(cn_bed_path: Path) -> Tuple[Dict[str, List[CnSegme
                 copy_number_state=_to_float_or_nan(parts[4]),
                 confidence=_to_float_or_nan(parts[5]),
             )
-            by_chrom.setdefault(chrom, []).append(seg)
+            hp2_seg = CnSegment(
+                chrom=chrom,
+                start=start,
+                end=end,
+                coverage=_to_float_or_nan(parts[6]),
+                copy_number_state=_to_float_or_nan(parts[7]),
+                confidence=_to_float_or_nan(parts[8]),
+            )
+            hp1_by_chrom.setdefault(chrom, []).append(hp1_seg)
+            hp2_by_chrom.setdefault(chrom, []).append(hp2_seg)
             kept_rows += 1
 
-    for chrom in by_chrom:
-        by_chrom[chrom].sort(key=lambda seg: (seg.start, seg.end))
+    for by_chrom in (hp1_by_chrom, hp2_by_chrom):
+        for chrom in by_chrom:
+            by_chrom[chrom].sort(key=lambda seg: (seg.start, seg.end))
 
-    return by_chrom, total_rows, kept_rows
+    return hp1_by_chrom, hp2_by_chrom, total_rows, kept_rows
 
 
 def overlap_bp_closed(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
@@ -206,8 +234,7 @@ def build_dual_haplotype_cn_annotation(
     """
     Annotate a genomic span with CN information from BOTH haplotypes.
 
-    The two BEDs are treated independently (they do not need matching intervals):
-    we pick the best-overlap segment from HP1 and HP2 separately, then combine.
+    We pick the best-overlap segment from the HP1 and HP2 tracks, then combine.
     """
     seg1, ov1 = best_cn_segment_for_span(cn_segments_hp1, chrom, span_start, span_end)
     seg2, ov2 = best_cn_segment_for_span(cn_segments_hp2, chrom, span_start, span_end)
@@ -233,7 +260,7 @@ def write_merged_cn_segments_tsv(
     cn_segments_hp2: Dict[str, List[CnSegment]],
 ) -> int:
     """
-    Write a merged CN table by splitting at all breakpoints from both haplotype BEDs.
+    Write a merged CN table by splitting at all breakpoints from both haplotype tracks.
     This handles imperfectly aligned intervals by keeping HP1 and HP2 assignments
     separately on each merged interval.
     """
@@ -871,16 +898,10 @@ def main():
         help="Directory containing .vcf / .vcf.gz files",
     )
     ap.add_argument(
-        "--cn-bed-hp1",
+        "--cn-bed",
         type=Path,
         default=None,
-        help="Copy-number BED segments file for haplotype 1.",
-    )
-    ap.add_argument(
-        "--cn-bed-hp2",
-        type=Path,
-        default=None,
-        help="Copy-number BED segments file for haplotype 2.",
+        help="Wakhan integer_profile.bed containing HP1 and HP2 copy-number columns.",
     )
     ap.add_argument(
         "--vcf_recursive",
@@ -920,11 +941,9 @@ def main():
     vcf_dir: Optional[Path] = args.vcfs
     out_root: Optional[Path] = args.out
     do_vcf = vcf_dir is not None
-    if (args.cn_bed_hp1 is None) != (args.cn_bed_hp2 is None):
-        raise SystemExit("Provide both --cn-bed-hp1 and --cn-bed-hp2 together.")
-    do_cn = args.cn_bed_hp1 is not None and args.cn_bed_hp2 is not None
+    do_cn = args.cn_bed is not None
     if not do_vcf and not do_cn:
-        raise SystemExit("Provide at least one annotation source: --vcfs and/or both --cn-bed-hp1/--cn-bed-hp2.")
+        raise SystemExit("Provide at least one annotation source: --vcfs and/or --cn-bed.")
 
     uncondensed_files = find_graph_files(main_out)
     condensed_files = find_condensed_graph_files(main_out)
@@ -969,21 +988,18 @@ def main():
     cn_segments_hp1: Dict[str, List[CnSegment]] = {}
     cn_segments_hp2: Dict[str, List[CnSegment]] = {}
     if do_cn:
-        cn_bed_hp1_path = args.cn_bed_hp1.resolve()
-        cn_bed_hp2_path = args.cn_bed_hp2.resolve()
-        cn_segments_hp1, cn_rows_total_hp1, cn_rows_kept_hp1 = load_cn_segments_by_chrom(
-            cn_bed_hp1_path
-        )
-        cn_segments_hp2, cn_rows_total_hp2, cn_rows_kept_hp2 = load_cn_segments_by_chrom(
-            cn_bed_hp2_path
-        )
-        print(
-            f"[cn_bed_hp1] Loaded {cn_rows_kept_hp1}/{cn_rows_total_hp1} segment row(s) "
-            f"across {len(cn_segments_hp1)} chromosome(s) from {cn_bed_hp1_path}"
+        cn_bed_path = args.cn_bed.resolve()
+        (
+            cn_segments_hp1,
+            cn_segments_hp2,
+            cn_rows_total,
+            cn_rows_kept,
+        ) = load_dual_haplotype_cn_segments_by_chrom(
+            cn_bed_path
         )
         print(
-            f"[cn_bed_hp2] Loaded {cn_rows_kept_hp2}/{cn_rows_total_hp2} segment row(s) "
-            f"across {len(cn_segments_hp2)} chromosome(s) from {cn_bed_hp2_path}"
+            f"[cn_bed] Loaded {cn_rows_kept}/{cn_rows_total} dual-haplotype segment row(s) "
+            f"across {len(cn_segments_hp1)} chromosome(s) from {cn_bed_path}"
         )
         merged_cn_out_root = out_root if out_root is not None else main_out
         merged_cn_path = merged_cn_out_root / "merged_haplotype_cn_segments.tsv"
