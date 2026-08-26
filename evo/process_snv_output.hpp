@@ -1,3 +1,7 @@
 #include <string>
 
-void processFile(const std::string& filename, int minReads);
+void processFile(
+    const std::string& filename,
+    int minReads,
+    bool divergentSameHp
+);

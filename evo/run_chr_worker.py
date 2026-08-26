@@ -91,16 +91,32 @@ def scan_vcf_filter_pass_presence(vcf_path):
     return pass_records > 0, total_records, pass_records
 
 
+def get_vcf_samples(vcf_path):
+    """Return sample names from a VCF header in declared order."""
+    result = subprocess.run(
+        ["bcftools", "query", "-l", vcf_path],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
 def process_chromosome(
     chrom,
     length,
-    bam_path,
+    bam_paths,
     vcf_path,
+    germline_vcf_path,
     outdir,
     log_dir,
     main_program,
     vcf_sample_name,
+    germline_vcf_sample_name,
+    exclude_regions_bed,
     require_pass_filter,
+    germline_require_pass_filter,
+    divergent_same_hp,
     tool_threads,
     force_single_thread_tools,
 ):
@@ -127,22 +143,55 @@ def process_chromosome(
         chrom_log.write(f"Preprocessing directory: {pre_dir}\n")
         chrom_log.write(f"Main output directory: {out_dir}\n")
         chrom_log.write(f"tool_threads_per_subprocess={tool_threads}\n")
+        chrom_log.write(f"input_bam_count={len(bam_paths)}\n")
         chrom_log.write(f"force_single_thread_tools={int(force_single_thread_tools)}\n")
+        chrom_log.write(
+            "haplotag_mode="
+            + ("germline_vcf" if germline_vcf_path else "bam_hp_tags")
+            + "\n"
+        )
+        chrom_log.write(
+            f"divergent_same_hp={int(divergent_same_hp)}\n"
+        )
+        if exclude_regions_bed:
+            chrom_log.write(
+                f"exclude_regions_bed={exclude_regions_bed}\n"
+            )
         chrom_log.flush()
 
         # --- Step 1: Split BAM for this chromosome with filters ---
-        chrom_bam = os.path.join(pre_dir, f"{chrom}.bam")
-        # Exclude unmapped, secondary, supplementary reads; MAPQ < 20
-        run_cmd([
-            "samtools", "view", "-b", "-@", str(tool_threads), "-F", "2308", "-q", "20",
-            bam_path, region, "-o", chrom_bam
-        ], log_fh=chrom_log, env=cmd_env)
-        run_cmd(["samtools", "index", "-@", str(tool_threads), chrom_bam], log_fh=chrom_log, env=cmd_env)
+        bam_preprocess_t0 = time.monotonic()
+        chrom_bams = []
+        for bam_index, bam_path in enumerate(bam_paths, start=1):
+            if len(bam_paths) == 1:
+                chrom_bam = os.path.join(pre_dir, f"{chrom}.bam")
+            else:
+                chrom_bam = os.path.join(
+                    pre_dir, f"{chrom}.input{bam_index}.bam"
+                )
+            chrom_bams.append(chrom_bam)
+            # Exclude unmapped, secondary, supplementary reads; MAPQ < 20
+            run_cmd([
+                "samtools", "view", "-b", "-@", str(tool_threads),
+                "-F", "2308", "-q", "20", bam_path, region,
+                "-o", chrom_bam,
+            ], log_fh=chrom_log, env=cmd_env)
+            run_cmd(
+                ["samtools", "index", "-@", str(tool_threads), chrom_bam],
+                log_fh=chrom_log,
+                env=cmd_env,
+            )
+        chrom_log.write(
+            f"[stage_timing] stage=bam_preprocess seconds="
+            f"{time.monotonic() - bam_preprocess_t0:.6f}\n"
+        )
+        chrom_log.flush()
 
         # --- Step 2: Split VCF for this chromosome with SNP-only filter.
         # Require FILTER=PASS only when PASS is defined in VCF header metadata.
         chrom_vcf = os.path.join(pre_dir, f"{chrom}.vcf.gz")
         chrom_vcf_plain = os.path.join(pre_dir, f"{chrom}.vcf")
+        somatic_vcf_t0 = time.monotonic()
         chrom_log.write(f"vcf_require_filter_PASS={int(require_pass_filter)}\n")
         view_cmd = [
             "bcftools",
@@ -163,17 +212,94 @@ def process_chromosome(
             log_fh=chrom_log,
             env=cmd_env,
         )
+        chrom_log.write(
+            f"[stage_timing] stage=somatic_vcf_preprocess seconds="
+            f"{time.monotonic() - somatic_vcf_t0:.6f}\n"
+        )
+
+        chrom_germline_vcf = None
+        if germline_vcf_path:
+            germline_vcf_t0 = time.monotonic()
+            chrom_germline_vcf = os.path.join(
+                pre_dir, f"{chrom}.germline.vcf.gz"
+            )
+            chrom_log.write(
+                "germline_vcf_require_filter_PASS="
+                f"{int(germline_require_pass_filter)}\n"
+            )
+            germline_view_cmd = [
+                "bcftools",
+                "view",
+                "--threads",
+                str(tool_threads),
+                "-Oz",
+                "-r",
+                chrom,
+            ]
+            if germline_require_pass_filter:
+                germline_view_cmd.extend(["-f", "PASS"])
+            germline_view_cmd.extend([
+                "-v",
+                "snps",
+                germline_vcf_path,
+                "-o",
+                chrom_germline_vcf,
+            ])
+            run_cmd(germline_view_cmd, log_fh=chrom_log, env=cmd_env)
+            run_cmd(
+                [
+                    "bcftools",
+                    "index",
+                    "--threads",
+                    str(tool_threads),
+                    chrom_germline_vcf,
+                ],
+                log_fh=chrom_log,
+                env=cmd_env,
+            )
+            chrom_log.write(
+                f"[stage_timing] stage=germline_vcf_preprocess seconds="
+                f"{time.monotonic() - germline_vcf_t0:.6f}\n"
+            )
+        chrom_log.flush()
 
         # --- Step 3: Run main program ---
-        main_cmd = [
-            main_program,
-            "--vcf", chrom_vcf,
-            "--bam", chrom_bam,
-            "--output-dir", out_dir,
-        ]
+        main_cmd = [main_program, "--somatic-vcf", chrom_vcf]
+        for chrom_bam in chrom_bams:
+            main_cmd.extend(["--bam", chrom_bam])
+        main_cmd.extend(["--output-dir", out_dir])
         if vcf_sample_name:
-            main_cmd.extend(["--vcf-sample-name", vcf_sample_name])
+            main_cmd.extend(["--somatic-sample-name", vcf_sample_name])
+        if chrom_germline_vcf:
+            main_cmd.extend(["--germline-vcf", chrom_germline_vcf])
+            main_cmd.extend([
+                "--germline-vcf-sample-name",
+                germline_vcf_sample_name,
+            ])
+        if exclude_regions_bed:
+            main_cmd.extend([
+                "--exclude-regions-bed",
+                exclude_regions_bed,
+            ])
+        if divergent_same_hp:
+            main_cmd.append("--divergent-same-hp")
+
+        main_t0 = time.monotonic()
         run_cmd(main_cmd, log_fh=chrom_log, env=cmd_env)
+        chrom_log.write(
+            f"[stage_timing] stage=main seconds="
+            f"{time.monotonic() - main_t0:.6f}\n"
+        )
+
+        # The chromosome BAM is no longer needed after ./main succeeds.
+        for chrom_bam in chrom_bams:
+            for temporary_bam_file in (chrom_bam, chrom_bam + ".bai"):
+                if os.path.exists(temporary_bam_file):
+                    os.remove(temporary_bam_file)
+                    chrom_log.write(
+                        f"removed_temporary_file={temporary_bam_file}\n"
+                    )
+        chrom_log.flush()
 
         # --- Step 4: Chromosome-wide edge summary ---
         chrom_log.flush()

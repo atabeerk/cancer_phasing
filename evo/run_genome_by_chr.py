@@ -29,6 +29,7 @@ from run_chr_runlog import (
 )
 from run_chr_worker import (
     get_chromosomes_from_bam,
+    get_vcf_samples,
     process_chromosome,
     run_cmd,
     scan_vcf_filter_pass_presence,
@@ -72,7 +73,10 @@ def merge_haplotagged_snv_tsvs(outdir, chromosomes):
     # Ensure a valid header-only file exists even if no per-chrom files were found.
     if not wrote_header:
         with open(merged_path, "w", encoding="utf-8") as out:
-            out.write("CHR\tPOSITION\tTOTAL_COVERAGE\tHP_COUNTS\tHP_ASSIGNMENT\n")
+            out.write(
+                "CHR\tPOSITION\tTOTAL_COVERAGE\tHP_COUNTS"
+                "\tHP1_HVAF\tHP2_HVAF\tHP_ASSIGNMENT\n"
+            )
 
     return merged_path, merged_files, rows_written
 
@@ -81,9 +85,13 @@ def main():
     # Parse and normalize CLI inputs used by the orchestration layer.
     args = parse_args()
     vcf_path = args.input_vcf_gz
-    bam_path = args.haplotagged_bam
+    bam_paths = args.haplotagged_bams
     outdir = os.path.abspath(args.output_dir)
     vcf_sample_name = args.vcf_sample_name
+    germline_vcf_path = args.germline_vcf_gz
+    germline_vcf_sample_name = args.germline_vcf_sample_name
+    exclude_regions_bed = args.exclude_regions_bed
+    divergent_same_hp = args.divergent_same_hp
     jobs = args.jobs
     post_vcfs = args.vcfs
     post_cn_bed_hp1 = args.cn_bed_hp1
@@ -99,9 +107,37 @@ def main():
         sys.exit(f"Error: {exc}")
 
     # Validate all required on-disk inputs before launching any work.
-    for f in [vcf_path, bam_path, main_program]:
+    required_files = [vcf_path, main_program, *bam_paths]
+    if germline_vcf_path:
+        required_files.append(germline_vcf_path)
+    if exclude_regions_bed:
+        required_files.append(exclude_regions_bed)
+    for f in required_files:
         if not os.path.exists(f):
             sys.exit(f"Error: required file not found: {f}")
+
+    somatic_samples = get_vcf_samples(vcf_path)
+    if vcf_sample_name:
+        if vcf_sample_name not in somatic_samples:
+            sys.exit(
+                f"Error: somatic VCF sample '{vcf_sample_name}' was not found."
+            )
+    elif len(somatic_samples) == 1:
+        vcf_sample_name = somatic_samples[0]
+        print(f"Using sole somatic VCF sample: {vcf_sample_name}")
+    elif len(somatic_samples) > 1:
+        sys.exit(
+            "Error: --somatic-sample-name is required because the somatic VCF "
+            f"contains {len(somatic_samples)} samples."
+        )
+
+    if germline_vcf_path:
+        germline_samples = get_vcf_samples(germline_vcf_path)
+        if germline_vcf_sample_name not in germline_samples:
+            sys.exit(
+                "Error: germline VCF sample "
+                f"'{germline_vcf_sample_name}' was not found."
+            )
 
     os.makedirs(outdir, exist_ok=True)
     log_dir = os.path.join(outdir, "logs")
@@ -110,14 +146,22 @@ def main():
     run_log_path = os.path.join(log_dir, f"run_{run_stamp}.log")
 
     # Derive genome name
-    genome_name = os.path.basename(bam_path).replace(".bam", "")
+    genome_name = os.path.basename(bam_paths[0]).replace(".bam", "")
     print(f"Genome name: {genome_name}")
+    print(f"Input BAMs: {len(bam_paths)}")
     print(f"Logs directory: {log_dir}")
     print(f"Run log: {run_log_path}")
 
     # Build the chromosome task list and initialize genome-level accumulators.
     print("Extracting chromosome list from BAM header using samtools...")
-    detected_chromosomes = get_chromosomes_from_bam(bam_path)
+    detected_chromosomes = get_chromosomes_from_bam(bam_paths[0])
+    for bam_path in bam_paths[1:]:
+        bam_chromosomes = get_chromosomes_from_bam(bam_path)
+        if bam_chromosomes != detected_chromosomes:
+            sys.exit(
+                "Error: BAM sequence names and lengths do not match the first "
+                f"input BAM: {bam_path}"
+            )
     chromosomes = [
         (chrom, length)
         for chrom, length in detected_chromosomes
@@ -162,6 +206,15 @@ def main():
     tool_threads = 1 if jobs > 1 else 4
     force_single_thread_tools = jobs > 1
     require_pass_filter, total_vcf_records, pass_vcf_records = scan_vcf_filter_pass_presence(vcf_path)
+    germline_require_pass_filter = False
+    germline_total_vcf_records = 0
+    germline_pass_vcf_records = 0
+    if germline_vcf_path:
+        (
+            germline_require_pass_filter,
+            germline_total_vcf_records,
+            germline_pass_vcf_records,
+        ) = scan_vcf_filter_pass_presence(germline_vcf_path)
     print(
         "VCF filter mode: "
         + (
@@ -169,6 +222,22 @@ def main():
             if require_pass_filter
             else f"ignore FILTER=PASS (found 0 PASS records out of {total_vcf_records})"
         )
+    )
+    if germline_vcf_path:
+        print(
+            "Germline VCF filter mode: "
+            + (
+                "require FILTER=PASS "
+                f"(found {germline_pass_vcf_records} PASS records out of "
+                f"{germline_total_vcf_records})"
+                if germline_require_pass_filter
+                else "ignore FILTER=PASS "
+                f"(found 0 PASS records out of {germline_total_vcf_records})"
+            )
+        )
+    print(
+        "Haplotag mode: "
+        + ("germline_vcf" if germline_vcf_path else "bam_hp_tags")
     )
 
     with open(run_log_path, "w") as run_log:
@@ -178,9 +247,16 @@ def main():
             invocation_cmd=invocation_cmd,
             genome_name=genome_name,
             vcf_path=vcf_path,
-            bam_path=bam_path,
+            bam_paths=bam_paths,
             outdir=outdir,
             vcf_sample_name=vcf_sample_name,
+            germline_vcf_path=germline_vcf_path,
+            germline_vcf_sample_name=germline_vcf_sample_name,
+            exclude_regions_bed=exclude_regions_bed,
+            germline_total_vcf_records=germline_total_vcf_records,
+            germline_pass_vcf_records=germline_pass_vcf_records,
+            germline_require_pass_filter=germline_require_pass_filter,
+            divergent_same_hp=divergent_same_hp,
             jobs=jobs,
             tool_threads=tool_threads,
             total_vcf_records=total_vcf_records,
@@ -201,13 +277,18 @@ def main():
                 result = process_chromosome(
                     chrom=chrom,
                     length=length,
-                    bam_path=bam_path,
+                    bam_paths=bam_paths,
                     vcf_path=vcf_path,
+                    germline_vcf_path=germline_vcf_path,
                     outdir=outdir,
                     log_dir=log_dir,
                     main_program=main_program,
                     vcf_sample_name=vcf_sample_name,
+                    germline_vcf_sample_name=germline_vcf_sample_name,
+                    exclude_regions_bed=exclude_regions_bed,
                     require_pass_filter=require_pass_filter,
+                    germline_require_pass_filter=germline_require_pass_filter,
+                    divergent_same_hp=divergent_same_hp,
                     tool_threads=tool_threads,
                     force_single_thread_tools=force_single_thread_tools,
                 )
@@ -224,17 +305,22 @@ def main():
                 futures = {
                     executor.submit(
                         process_chromosome,
-                        chrom,
-                        length,
-                        bam_path,
-                        vcf_path,
-                        outdir,
-                        log_dir,
-                        main_program,
-                        vcf_sample_name,
-                        require_pass_filter,
-                        tool_threads,
-                        force_single_thread_tools,
+                        chrom=chrom,
+                        length=length,
+                        bam_paths=bam_paths,
+                        vcf_path=vcf_path,
+                        germline_vcf_path=germline_vcf_path,
+                        outdir=outdir,
+                        log_dir=log_dir,
+                        main_program=main_program,
+                        vcf_sample_name=vcf_sample_name,
+                        germline_vcf_sample_name=germline_vcf_sample_name,
+                        exclude_regions_bed=exclude_regions_bed,
+                        require_pass_filter=require_pass_filter,
+                        germline_require_pass_filter=germline_require_pass_filter,
+                        divergent_same_hp=divergent_same_hp,
+                        tool_threads=tool_threads,
+                        force_single_thread_tools=force_single_thread_tools,
                     ): (chrom, length)
                     for chrom, length in chrom_tasks
                 }

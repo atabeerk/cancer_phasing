@@ -169,18 +169,19 @@ def extract_max_span_scan_from_chrom_log(chrom_log_path):
 
 def extract_haplotag_status_from_chrom_log(chrom_log_path):
     """
-    Parse BAM haplotag detection status from a chromosome log.
+    Parse haplotagging status from a chromosome log.
     Returns a dict with keys:
       - haplotagged: "0" or "1" when available
       - source: text source when available
       - raw_status: raw "Using BAM haplotagged status = ..." line when available
-      - has_hp_tag: parsed from [haplotag_detect] line when available
+      - mode: germline_vcf or bam_hp_tags when available; has_hp_tag: legacy BAM detection
     """
     if not os.path.exists(chrom_log_path):
         return {}
 
     status_line = ""
     detect_line = ""
+    generic_line = ""
     with open(chrom_log_path, "r") as f:
         for line in f:
             s = line.strip()
@@ -188,8 +189,13 @@ def extract_haplotag_status_from_chrom_log(chrom_log_path):
                 status_line = s
             if s.startswith("[haplotag_detect]"):
                 detect_line = s
+            if s.startswith("[haplotag_status]"):
+                generic_line = s
 
     out = {}
+    if generic_line:
+        out.update(_parse_kv_tokens(generic_line))
+        out["raw_status"] = generic_line
     if status_line:
         out["raw_status"] = status_line
         m = re.search(r"Using BAM haplotagged status\s*=\s*([01])\s*\(([^)]+)\)", status_line)

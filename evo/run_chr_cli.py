@@ -34,10 +34,46 @@ def parse_args():
             "and write run/chromosome logs."
         )
     )
-    parser.add_argument("--vcf", dest="input_vcf_gz", required=True, help="Input VCF.gz")
-    parser.add_argument("--bam", dest="haplotagged_bam", required=True, help="Input haplotagged BAM")
+    parser.add_argument(
+        "--somatic-vcf",
+        dest="input_vcf_gz",
+        required=True,
+        help="Input somatic VCF.gz",
+    )
+    parser.add_argument(
+        "--bam",
+        dest="haplotagged_bams",
+        action="append",
+        required=True,
+        help="Input tumor BAM. Repeat --bam to provide multiple BAMs.",
+    )
     parser.add_argument("--output-dir", dest="output_dir", required=True, help="Output directory")
-    parser.add_argument("--vcf-sample-name", dest="vcf_sample_name", default="", help="Optional VCF sample name")
+    parser.add_argument(
+        "--somatic-sample-name",
+        dest="vcf_sample_name",
+        default="",
+        help="Somatic VCF sample name; required when the VCF has multiple samples.",
+    )
+    parser.add_argument(
+        "--germline-vcf",
+        dest="germline_vcf_gz",
+        default=None,
+        help="Optional phased germline VCF.gz used to infer read haplotypes.",
+    )
+    parser.add_argument(
+        "--germline-vcf-sample-name",
+        dest="germline_vcf_sample_name",
+        default="",
+        help="Required sample name when --germline-vcf is provided.",
+    )
+    parser.add_argument(
+        "--exclude-regions-bed",
+        default=None,
+        help=(
+            "Optional BED file whose intervals are excluded from the somatic "
+            "mutation set."
+        ),
+    )
     parser.add_argument(
         "--jobs",
         type=int,
@@ -53,6 +89,14 @@ def parse_args():
             "chr prefixes are optional, e.g. --exclude-chrom chr7 --exclude-chrom 9."
         ),
     )
+    parser.add_argument(
+        "--divergent-same-hp",
+        action="store_true",
+        help=(
+            "Only retain divergent relationships whose two mutations are both "
+            "HP1 or both HP2."
+        ),
+    )
     # Optional pass-through arguments for postprocessing.
     parser.add_argument("--vcfs", type=str, default=None, help="Postprocess: VCF directory for source annotation.")
     parser.add_argument("--cn-bed-hp1", type=str, default=None, help="Postprocess: HP1 copy-number BED.")
@@ -62,8 +106,10 @@ def parse_args():
     args = parser.parse_args()
     if args.jobs <= 0:
         parser.error("--jobs must be >= 1")
-    if (args.cn_bed_hp1 is None) != (args.cn_bed_hp2 is None):
-        parser.error("Provide both --cn-bed-hp1 and --cn-bed-hp2 together.")
+    if args.germline_vcf_gz and not args.germline_vcf_sample_name:
+        parser.error("--germline-vcf-sample-name is required with --germline-vcf.")
+    if args.germline_vcf_sample_name and not args.germline_vcf_gz:
+        parser.error("--germline-vcf-sample-name requires --germline-vcf.")
     return args
 
 

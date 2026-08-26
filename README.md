@@ -4,7 +4,7 @@ This repo contains an in progress tool for phasing somatic SNVs into clonal hapl
 Required inputs are:
 
 1. A `.vcf.gz` file containing somatic only variants.
-2. A `.bam` file where the tumor reads aligned against a reference (e.g., grch38)
+2. One or more `.bam` files containing tumor reads aligned against the same reference (e.g., GRCh38).
 
 The program will produce the following outputs under the specified directory:
 
@@ -60,18 +60,26 @@ This wrapper does the required preprocessing, runs the main program with each ch
 
 ```bash
 python run_genome_by_chr.py \
-  --vcf /path/to/input.vcf.gz \
+  --somatic-vcf /path/to/input.vcf.gz \
   --bam /path/to/input.haplotagged.bam \
+  --bam /path/to/additional.tumor.bam \
   --output-dir /path/to/output_dir \
   --jobs 4
 ```
+
+Repeat `--bam` for each tumor BAM. The files remain separate and are supplied together to `samtools mpileup`; no merged BAM is created.
+
+Use `--divergent-same-hp` to retain divergent relationships only when both mutations are assigned HP1 or both are assigned HP2. The default behavior remains unchanged.
+
+Use `--exclude-regions-bed /path/to/regions.bed` to remove somatic mutations overlapping standard 0-based, half-open BED intervals before pileup and relationship analysis. Germline variants used for read haplotagging are not filtered.
 
 * ### Alternatively, run `evo/main` directly (not recommended)
 
 ```bash
 ./main \
-  --vcf /path/to/input.vcf.gz \
+  --somatic-vcf /path/to/input.vcf.gz \
   --bam /path/to/input.haplotagged.bam \
+  --bam /path/to/additional.tumor.bam \
   --output-dir /path/to/output_dir \
 ```
 

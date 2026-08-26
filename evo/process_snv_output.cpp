@@ -432,7 +432,17 @@ Classification classifyEntry(const SNPEntry& e, int minReads, float coverageScal
 }
 
 
-void processFile(const string& filename, int minReads) {
+static bool hasSameAssignedHaplotype(const SNPEntry& e) {
+    return (e.hap1 == "HP1" && e.hap2 == "HP1") ||
+           (e.hap1 == "HP2" && e.hap2 == "HP2");
+}
+
+
+void processFile(
+    const string& filename,
+    int minReads,
+    bool divergentSameHp
+) {
     // First pass: read all entries to estimate a typical coverage (median TOTAL)
     ifstream infile(filename);
     if (!infile) {
@@ -442,6 +452,9 @@ void processFile(const string& filename, int minReads) {
 
     vector<int> coverages;
     string line;
+
+    int retainedDivergent = 0;
+    int filteredDivergent = 0;
 
     while (getline(infile, line)) {
         if (line.empty()) continue;
@@ -512,7 +525,12 @@ void processFile(const string& filename, int minReads) {
         if (cls.type == "cooccurring") {
             f_co << formatted << '\n';
         } else if (cls.type == "divergent") {
-            f_div << formatted << '\n';
+            if (!divergentSameHp || hasSameAssignedHaplotype(e)) {
+                f_div << formatted << '\n';
+                retainedDivergent++;
+            } else {
+                filteredDivergent++;
+            }
         } else if (cls.type == "snp1_before_snp2") {
             f_snp1 << formatted << '\n';
         } else if (cls.type == "snp2_before_snp1") {
@@ -539,5 +557,9 @@ void processFile(const string& filename, int minReads) {
     f_co_loss.close();
     f_err.close();
 
+    if (divergentSameHp) {
+        cout << "[divergent_same_hp] retained=" << retainedDivergent
+             << " filtered=" << filteredDivergent << "\n";
+    }
     cout << "Processing complete.\n";
 }

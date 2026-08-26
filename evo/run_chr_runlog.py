@@ -18,9 +18,16 @@ def write_run_header(
     invocation_cmd,
     genome_name,
     vcf_path,
-    bam_path,
+    bam_paths,
     outdir,
     vcf_sample_name,
+    germline_vcf_path,
+    germline_vcf_sample_name,
+    exclude_regions_bed,
+    germline_total_vcf_records,
+    germline_pass_vcf_records,
+    germline_require_pass_filter,
+    divergent_same_hp,
     jobs,
     tool_threads,
     total_vcf_records,
@@ -38,20 +45,50 @@ def write_run_header(
     run_log.write(f"Run started: {run_start_wall.isoformat(timespec='seconds')}\n")
     run_log.write(f"Invocation command: {invocation_cmd}\n")
     run_log.write(f"Genome: {genome_name}\n")
-    run_log.write(f"VCF: {vcf_path}\n")
-    run_log.write(f"BAM: {bam_path}\n")
+    run_log.write(f"Somatic VCF: {vcf_path}\n")
+    for bam_path in bam_paths:
+        run_log.write(f"BAM: {bam_path}\n")
     run_log.write(f"Output: {outdir}\n")
     if vcf_sample_name:
-        run_log.write(f"VCF sample name: {vcf_sample_name}\n")
+        run_log.write(f"Somatic sample name: {vcf_sample_name}\n")
+    if germline_vcf_path:
+        run_log.write(f"Germline VCF: {germline_vcf_path}\n")
+        run_log.write(
+            f"Germline VCF sample name: {germline_vcf_sample_name}\n"
+        )
+    if exclude_regions_bed:
+        run_log.write(f"Excluded-regions BED: {exclude_regions_bed}\n")
     run_log.write("\n=== Default/auto-selected parameters ===\n")
     run_log.write("main_default_min_reads=2\n")
     run_log.write("max_pair_distance_source=computed_by_main_per_chrom_bam\n")
-    run_log.write("haplotag_detect_source=computed_by_main_per_chrom_bam\n")
+    haplotag_mode = "germline_vcf" if germline_vcf_path else "bam_hp_tags"
+    run_log.write(f"haplotag_mode={haplotag_mode}\n")
+    run_log.write(f"divergent_same_hp={int(divergent_same_hp)}\n")
+    run_log.write(
+        "haplotag_detect_source="
+        + (
+            "germline_vcf_candidate_reads"
+            if germline_vcf_path
+            else "computed_by_main_per_chrom_bam"
+        )
+        + "\n"
+    )
     run_log.write(f"jobs={jobs}\n")
     run_log.write(f"tool_threads_per_subprocess={tool_threads}\n")
     run_log.write(f"vcf_total_records_scanned={total_vcf_records}\n")
     run_log.write(f"vcf_pass_records_found={pass_vcf_records}\n")
     run_log.write(f"vcf_require_filter_PASS={int(require_pass_filter)}\n")
+    if germline_vcf_path:
+        run_log.write(
+            f"germline_vcf_total_records_scanned={germline_total_vcf_records}\n"
+        )
+        run_log.write(
+            f"germline_vcf_pass_records_found={germline_pass_vcf_records}\n"
+        )
+        run_log.write(
+            "germline_vcf_require_filter_PASS="
+            f"{int(germline_require_pass_filter)}\n"
+        )
     run_log.write("parallel_mode=chromosome_thread_pool\n")
     if detected_chromosome_count is not None:
         run_log.write(f"Detected chromosomes before exclusion: {detected_chromosome_count}\n")
