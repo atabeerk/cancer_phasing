@@ -467,31 +467,21 @@ def export_condensed_cytoscape_json(
         json.dump(graph, f, indent=2)
 
 
-def write_inconsistency_log(builder: GraphBuilder, out_path: str) -> None:
-    """
-    Write a TSV log of rejected edges and reasons.
+def _in_region(u: int, v: int, region_start: Optional[int], region_end: Optional[int]) -> bool:
+    if region_start is None and region_end is None:
+        return True
+    if region_start is None or region_end is None:
+        raise ValueError("region_start and region_end must be provided together")
+    return region_start <= int(u) <= region_end and region_start <= int(v) <= region_end
 
-    Columns:
-      u, v                  : endpoints of the skipped edge
-      relation, loss        : relation type + loss flag of the skipped edge
-      reliability           : reliability of the skipped edge
-      read_counts           : "ALT_ALT/ALT_REF/REF_ALT/REF_REF" for the skipped edge
-      reason                : reason for skipping
-      conflict_u, conflict_v: endpoints of the conflicting existing edge (if any)
-      conflict_relation_label: relation+loss for the conflicting edge (e.g. "timing_loss")
-      conflict_reliability  : reliability of the conflicting edge
 
-    Notable reason values include:
-      - pair_type_conflict
-      - pair_direction_conflict
-      - cluster_merge_noncooccurring
-      - cluster_merge_timing_cycle
-      - cluster_internal_timing
-      - cluster_internal_divergent
-      - timing_cycle
-      - cluster_pair_relation_conflict
-      - cluster_pair_timing_direction_conflict
-    """
+def write_inconsistency_log(
+    builder: GraphBuilder,
+    out_path: str,
+    region_start: Optional[int] = None,
+    region_end: Optional[int] = None,
+) -> int:
+    """Write rejected edges, optionally restricted to one inclusive region."""
     fieldnames = [
         "u",
         "v",
@@ -505,32 +495,30 @@ def write_inconsistency_log(builder: GraphBuilder, out_path: str) -> None:
         "conflict_reliability",
     ]
 
+    written = 0
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
         writer.writeheader()
         for rec in builder.inconsistencies:
+            if not _in_region(rec["u"], rec["v"], region_start, region_end):
+                continue
             writer.writerow(rec)
+            written += 1
+    return written
 
 
-def write_accepted_edges(builder: GraphBuilder, out_path: str) -> None:
-    """
-    Write all accepted edges (those actually added to the graph)
-    in a single file, with fields similar to the C++ text output plus:
-
-      RELATION=<cooccurring|timing|divergent>
-      LOSS=<true|false>
-
-    Format (space-separated):
-
-      chr pos1 pos2 RELATION=... LOSS=... VAF1=... VAF2=...
-      ALT_ALT=... ALT_REF=... REF_ALT=... REF_REF=... TOTAL=...
-      HP_READS1=... HP_READS2=...
-      RELIABILITY=... BEST_SCORE=... MARGIN=...
-
-    where pos1=u, pos2=v (the oriented endpoints used in the graph).
-    """
+def write_accepted_edges(
+    builder: GraphBuilder,
+    out_path: str,
+    region_start: Optional[int] = None,
+    region_end: Optional[int] = None,
+) -> int:
+    """Write accepted edges, optionally restricted to one inclusive region."""
+    written = 0
     with open(out_path, "w") as f:
         for e in builder.edges:
+            if not _in_region(e.u, e.v, region_start, region_end):
+                continue
             total = e.alt_alt + e.alt_ref + e.ref_alt + e.ref_ref
             line = (
                 f"{e.chrom} {e.u} {e.v} "
@@ -549,3 +537,5 @@ def write_accepted_edges(builder: GraphBuilder, out_path: str) -> None:
                 f"MARGIN={e.margin}"
             )
             f.write(line + "\n")
+            written += 1
+    return written

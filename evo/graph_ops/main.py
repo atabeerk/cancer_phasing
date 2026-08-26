@@ -278,13 +278,7 @@ def main():
                 all_timing_nodes.add((e.chrom, e.v))
                 total_timing_edges += 1
 
-        log_path = os.path.join(outdir, f"{basename}_inconsistencies.tsv")
-        accepted_path = os.path.join(outdir, f"{basename}_accepted_edges.txt")
-
         export_t0 = time.monotonic()
-        write_inconsistency_log(builder, log_path)
-        write_accepted_edges(builder, accepted_path)
-
         component_rows = compute_component_statistics_rows(
             builder,
             chunk_base=basename,
@@ -296,16 +290,32 @@ def main():
             partition_nodes = _component_partition_nodes(partition_rows)
             partition_base = f"chunk_{chrom}_{partition_start}_{partition_end}"
             partition_specs.append(
-                (partition_base, partition_nodes, partition_rows)
+                (partition_base, partition_start, partition_end, partition_nodes, partition_rows)
             )
 
         partition_paths = []
+        written_accepted_edges = 0
+        written_inconsistencies = 0
 
-        for partition_base, partition_nodes, partition_rows in partition_specs:
+        for (
+            partition_base,
+            partition_start,
+            partition_end,
+            partition_nodes,
+            partition_rows,
+        ) in partition_specs:
             json_path = os.path.join(outdir, f"{partition_base}.json")
             condensed_json_path = os.path.join(
                 outdir,
                 f"{partition_base}_condensed.json",
+            )
+            accepted_path = os.path.join(
+                outdir,
+                f"{partition_base}_accepted_edges.txt",
+            )
+            log_path = os.path.join(
+                outdir,
+                f"{partition_base}_inconsistencies.tsv",
             )
 
             export_cytoscape_json(
@@ -320,6 +330,18 @@ def main():
                 name=partition_base + "_condensed",
                 node_subset=partition_nodes,
             )
+            written_accepted_edges += write_accepted_edges(
+                builder,
+                accepted_path,
+                region_start=partition_start,
+                region_end=partition_end,
+            )
+            written_inconsistencies += write_inconsistency_log(
+                builder,
+                log_path,
+                region_start=partition_start,
+                region_end=partition_end,
+            )
 
             stats_rows = []
             for component_id, row in enumerate(partition_rows):
@@ -328,7 +350,19 @@ def main():
                 output_row["component_id"] = component_id
                 stats_rows.append(output_row)
             append_component_statistics_tsv(stats_rows, component_stats_path)
-            partition_paths.append((json_path, condensed_json_path))
+            partition_paths.append((json_path, condensed_json_path, accepted_path, log_path))
+
+        if written_accepted_edges != len(builder.edges):
+            raise AssertionError(
+                "Final graph regions do not cover every accepted edge: "
+                f"wrote={written_accepted_edges} accepted={len(builder.edges)}"
+            )
+        if written_inconsistencies != len(builder.inconsistencies):
+            raise AssertionError(
+                "Final graph regions do not cover every inconsistency: "
+                f"wrote={written_inconsistencies} "
+                f"inconsistencies={len(builder.inconsistencies)}"
+            )
 
         print(
             f"[graph_ops]   export_done chromosome={chrom} "
@@ -338,9 +372,7 @@ def main():
         )
 
         print(
-            f"[graph_ops]   -> wrote {len(partition_paths)} paired graph JSON partition(s)\n"
-            f"inconsistencies: {log_path}\n"
-            f"accepted edges: {accepted_path}\n"
+            f"[graph_ops]   -> wrote {len(partition_paths)} graph JSON partition(s) with matching edge files\n"
             f"(nodes: {len(builder.nodes)}, edges: {len(builder.edges)})"
             f"\nchromosome_elapsed={time.monotonic() - chrom_t0:.3f}s",
             flush=True,
