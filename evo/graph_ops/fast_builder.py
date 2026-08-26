@@ -186,7 +186,6 @@ class FastGraphBuilder:
             "u": new_edge.u,
             "v": new_edge.v,
             "relation": new_edge.relation,
-            "loss": new_edge.loss,
             "reliability": new_edge.reliability,
             "read_counts": read_counts_str,
             "reason": reason,
@@ -198,9 +197,7 @@ class FastGraphBuilder:
         if conflict_edge is not None:
             rec["conflict_u"] = conflict_edge.u
             rec["conflict_v"] = conflict_edge.v
-            rec["conflict_relation_label"] = (
-                f"{conflict_edge.relation}_loss" if conflict_edge.loss else conflict_edge.relation
-            )
+            rec["conflict_relation_label"] = conflict_edge.relation
             rec["conflict_reliability"] = conflict_edge.reliability
         self.inconsistencies.append(rec)
 

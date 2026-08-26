@@ -16,7 +16,6 @@ class Edge:
     v: int                # pos2 in oriented graph (target)
 
     relation: str         # "cooccurring" | "timing" | "divergent"
-    loss: bool
     reliability: float    # RELIABILITY from C++ output
 
     alt_alt: int = 0

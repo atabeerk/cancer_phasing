@@ -128,7 +128,6 @@ def export_cytoscape_json(
             "source": "<u>",
             "target": "<v>",
             "relation": "timing" | "cooccurring" | "divergent",
-            "loss": <bool>,
             "reliability": <float>,
             "directed": <bool>,         # True only for timing
             "read_counts": "x/y/z/t",   # ALT_ALT/ALT_REF/REF_ALT/REF_REF
@@ -197,7 +196,6 @@ def export_cytoscape_json(
                 "source": str(e.u),
                 "target": str(e.v),
                 "relation": e.relation,           # "cooccurring" / "timing" / "divergent"
-                "loss": e.loss,
                 "reliability": e.reliability,
                 "directed": (e.relation == "timing"),
                 "read_counts": read_counts_str,
@@ -249,7 +247,6 @@ def export_condensed_cytoscape_json(
             "source": "<cluster_rep_u>",
             "target": "<cluster_rep_v>",
             "relation": "timing" | "divergent",
-            "loss": <bool>,
             "reliability": <float>,        # max reliability of supporting SNV–SNV edges
             "directed": <bool>,            # True only for timing
             "read_counts": "x/y/z/t",      # summed ALT_ALT/ALT_REF/REF_ALT/REF_REF
@@ -369,13 +366,13 @@ def export_condensed_cytoscape_json(
             continue
 
         if e.relation == "timing":
-            key = (cu, cv, "timing", e.loss)
+            key = (cu, cv, "timing")
             directed = True
             rep_u, rep_v = cu, cv
         else:  # "divergent"
             # Undirected; canonical ordering of cluster reps
             rep_u, rep_v = (cu, cv) if cu <= cv else (cv, cu)
-            key = (rep_u, rep_v, "divergent", e.loss)
+            key = (rep_u, rep_v, "divergent")
             directed = False
 
         read_counts_str = f"{e.alt_alt}/{e.alt_ref}/{e.ref_alt}/{e.ref_ref}"
@@ -393,7 +390,6 @@ def export_condensed_cytoscape_json(
                 "u": rep_u,
                 "v": rep_v,
                 "relation": e.relation,
-                "loss": e.loss,
                 "directed": directed,
                 "alt_alt": e.alt_alt,
                 "alt_ref": e.alt_ref,
@@ -430,7 +426,6 @@ def export_condensed_cytoscape_json(
                 "source": str(rec["u"]),
                 "target": str(rec["v"]),
                 "relation": rec["relation"],
-                "loss": rec["loss"],
                 "reliability": rec["reliability"],
                 "directed": rec["directed"],
                 "read_counts": read_counts_str,
@@ -501,7 +496,6 @@ def write_inconsistency_log(builder: GraphBuilder, out_path: str) -> None:
         "u",
         "v",
         "relation",
-        "loss",
         "reliability",
         "read_counts",
         "reason",
@@ -538,12 +532,9 @@ def write_accepted_edges(builder: GraphBuilder, out_path: str) -> None:
     with open(out_path, "w") as f:
         for e in builder.edges:
             total = e.alt_alt + e.alt_ref + e.ref_alt + e.ref_ref
-            loss_str = "true" if e.loss else "false"
-
             line = (
                 f"{e.chrom} {e.u} {e.v} "
                 f"RELATION={e.relation} "
-                f"LOSS={loss_str} "
                 f"VAF1={e.vaf_u} "
                 f"VAF2={e.vaf_v} "
                 f"ALT_ALT={e.alt_alt} "

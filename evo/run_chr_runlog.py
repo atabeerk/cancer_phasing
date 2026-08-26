@@ -234,17 +234,6 @@ def write_genome_edge_summary(run_log, genome_edge_haplotype_stats, chrom_haplot
         rec = genome_edge_haplotype_stats[relation]
 
         run_log.write(f"\n{relation_label[relation]} edges (accepted):        {rec['total']}\n")
-        run_log.write(
-            f"  Without loss:                      {rec['without_loss']}"
-            + (f"  ({_pct(rec['without_loss'], rec['total'])} of relation)" if rec["total"] > 0 else "")
-            + "\n"
-        )
-        run_log.write(
-            f"  With loss:                         {rec['with_loss']}"
-            + (f"  ({_pct(rec['with_loss'], rec['total'])} of relation)" if rec["total"] > 0 else "")
-            + "\n"
-        )
-
         if any_haplotag_detected:
             run_log.write(
                 f"  Same haplotype:                    {rec['same_haplotype']}"

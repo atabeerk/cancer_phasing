@@ -78,201 +78,71 @@ float calculateReliabilityForRelationship(const SNPEntry& e,
                                           const std::string& relType,
                                           int minReads)
 {
-    if (e.TOTAL == 0) return 0.0f;
+    const int informative_reads = e.ALT_ALT + e.ALT_REF + e.REF_ALT;
+    if (informative_reads == 0) return 0.0f;
 
-    const float obs_RR = static_cast<float>(e.REF_REF) / e.TOTAL;
-    const float obs_AR = static_cast<float>(e.ALT_REF) / e.TOTAL;
-    const float obs_RA = static_cast<float>(e.REF_ALT) / e.TOTAL;
-    const float obs_AA = static_cast<float>(e.ALT_ALT) / e.TOTAL;
-
-    float reliability = 0.0f;
+    // Condition every relation on reads carrying at least one ALT allele.
+    // REF/REF reads are uninformative about the relationship between the two
+    // mutations and are excluded from both support and penalties.
+    const float obs_AR = static_cast<float>(e.ALT_REF) / informative_reads;
+    const float obs_RA = static_cast<float>(e.REF_ALT) / informative_reads;
+    const float obs_AA = static_cast<float>(e.ALT_ALT) / informative_reads;
 
     if (relType == "snp1_before_snp2") {
-        // requires VAF1 >= VAF2
-        if (e.vaf1 < e.vaf2) {
-            return 0.0f;
-        }
+        if (e.vaf1 < e.vaf2) return 0.0f;
+        if (e.ALT_REF < minReads || e.ALT_ALT < minReads) return 0.0f;
 
-        // Required: R/R, A/R, A/A
-        if (e.REF_REF < minReads || e.ALT_REF < minReads || e.ALT_ALT < minReads) {
-            return 0.0f;
-        }
-
-        // Relationship-aware expected fractions:
-        float exp_RR = 1.0f - e.vaf1;
         float exp_AR = e.vaf1 - e.vaf2;
         float exp_AA = e.vaf2;
-
-        if (exp_RR <= 0.0f || exp_AR <= 0.0f || exp_AA <= 0.0f) {
-            return 0.0f;
-        }
+        const float expected_total = exp_AR + exp_AA;
+        if (expected_total <= 0.0f) return 0.0f;
+        exp_AR /= expected_total;
+        exp_AA /= expected_total;
 
         float min_ratio = 1.0f;
-        min_ratio = std::min(min_ratio, obs_RR / exp_RR);
         min_ratio = std::min(min_ratio, obs_AR / exp_AR);
         min_ratio = std::min(min_ratio, obs_AA / exp_AA);
-
-        // Forbidden: R/A
-        float forbidden_penalty = obs_RA;
-
-        reliability = min_ratio - forbidden_penalty;
-        return std::max(0.0f, reliability);
+        return std::max(0.0f, min_ratio - obs_RA);
     }
 
     if (relType == "snp2_before_snp1") {
-        // requires VAF2 >= VAF1
-        if (e.vaf2 < e.vaf1) {
-            return 0.0f;
-        }
+        if (e.vaf2 < e.vaf1) return 0.0f;
+        if (e.REF_ALT < minReads || e.ALT_ALT < minReads) return 0.0f;
 
-        // Required: R/R, R/A, A/A
-        if (e.REF_REF < minReads || e.REF_ALT < minReads || e.ALT_ALT < minReads) {
-            return 0.0f;
-        }
-
-        // Relationship-aware expected fractions:
-        float exp_RR = 1.0f - e.vaf2;
         float exp_RA = e.vaf2 - e.vaf1;
         float exp_AA = e.vaf1;
-
-        if (exp_RR <= 0.0f || exp_RA <= 0.0f || exp_AA <= 0.0f) {
-            return 0.0f;
-        }
+        const float expected_total = exp_RA + exp_AA;
+        if (expected_total <= 0.0f) return 0.0f;
+        exp_RA /= expected_total;
+        exp_AA /= expected_total;
 
         float min_ratio = 1.0f;
-        min_ratio = std::min(min_ratio, obs_RR / exp_RR);
         min_ratio = std::min(min_ratio, obs_RA / exp_RA);
         min_ratio = std::min(min_ratio, obs_AA / exp_AA);
-
-        // Forbidden: A/R
-        float forbidden_penalty = obs_AR;
-
-        reliability = min_ratio - forbidden_penalty;
-        return std::max(0.0f, reliability);
+        return std::max(0.0f, min_ratio - obs_AR);
     }
 
     if (relType == "cooccurring") {
-        // Required: R/R, A/A
-        if (e.REF_REF < minReads || e.ALT_ALT < minReads) {
-            return 0.0f;
-        }
-
-        float exp_RR = std::min(1.0f - e.vaf1, 1.0f - e.vaf2);
-        float exp_AA = std::min(e.vaf1, e.vaf2);
-
-        float min_ratio = 1.0f;
-        if (exp_RR > 0.0f) min_ratio = std::min(min_ratio, obs_RR / exp_RR);
-        if (exp_AA > 0.0f) min_ratio = std::min(min_ratio, obs_AA / exp_AA);
-
-        // Forbidden: A/R, R/A
-        float forbidden_penalty = obs_AR + obs_RA;
-
-        reliability = min_ratio - forbidden_penalty;
-        return std::max(0.0f, reliability);
+        if (e.ALT_ALT < minReads) return 0.0f;
+        return std::max(0.0f, obs_AA - obs_AR - obs_RA);
     }
 
-    // Co-occurring with loss
-    if (relType == "cooccurring_loss") {
-        // Required: A/A only
-        if (e.ALT_ALT < minReads) {
-            return 0.0f;
-        }
-
-        float exp_AA = std::min(e.vaf1, e.vaf2);
-
-        float min_ratio = 1.0f;
-        if (exp_AA > 0.0f) min_ratio = std::min(min_ratio, obs_AA / exp_AA);
-
-        // Forbidden: R/R, A/R, R/A
-        float forbidden_penalty = obs_RR + obs_AR + obs_RA;
-
-        reliability = min_ratio - forbidden_penalty;
-        return std::max(0.0f, reliability);
-    }
-
-    // Divergent
     if (relType == "divergent") {
-        // Required: A/R, R/A
-        if (e.ALT_REF < minReads || e.REF_ALT < minReads) {
-            return 0.0f;
-        }
+        if (e.ALT_REF < minReads || e.REF_ALT < minReads) return 0.0f;
 
         float exp_AR = std::min(e.vaf1, 1.0f - e.vaf2);
         float exp_RA = std::min(1.0f - e.vaf1, e.vaf2);
-
-        float min_ratio = 1.0f;
-        if (exp_AR > 0.0f) min_ratio = std::min(min_ratio, obs_AR / exp_AR);
-        if (exp_RA > 0.0f) min_ratio = std::min(min_ratio, obs_RA / exp_RA);
-
-        // Forbidden: R/R, A/A
-        float forbidden_penalty = obs_RR + obs_AA;
-
-        reliability = min_ratio - forbidden_penalty;
-        return std::max(0.0f, reliability);
-    }
-
-    // SNP1 before SNP2 with loss (SNP1=A branch only)
-    if (relType == "snp1_before_snp2_loss") {
-        // Feasibility: SNP1-before-SNP2-loss requires VAF1 >= VAF2
-        if (e.vaf1 < e.vaf2) {
-            return 0.0f;
-        }
-
-        // Required: A/R, A/A
-        if (e.ALT_REF < minReads || e.ALT_ALT < minReads) {
-            return 0.0f;
-        }
-
-        // Expected fractions in SNP1=A branch:
-        float exp_AR = e.vaf1 - e.vaf2;
-        float exp_AA = e.vaf2;
-
-        if (exp_AR <= 0.0f || exp_AA <= 0.0f) {
-            return 0.0f;
-        }
+        const float expected_total = exp_AR + exp_RA;
+        if (expected_total <= 0.0f) return 0.0f;
+        exp_AR /= expected_total;
+        exp_RA /= expected_total;
 
         float min_ratio = 1.0f;
         min_ratio = std::min(min_ratio, obs_AR / exp_AR);
-        min_ratio = std::min(min_ratio, obs_AA / exp_AA);
-
-        // Forbidden: R/R, R/A
-        float forbidden_penalty = obs_RR + obs_RA;
-
-        reliability = min_ratio - forbidden_penalty;
-        return std::max(0.0f, reliability);
-    }
-
-    // SNP2 before SNP1 with loss (SNP2=A branch only)
-    if (relType == "snp2_before_snp1_loss") {
-        // requires VAF2 >= VAF1
-        if (e.vaf2 < e.vaf1) {
-            return 0.0f;
-        }
-
-        // Required: R/A, A/A
-        if (e.REF_ALT < minReads || e.ALT_ALT < minReads) {
-            return 0.0f;
-        }
-
-        float exp_RA = e.vaf2 - e.vaf1;
-        float exp_AA = e.vaf1;
-
-        if (exp_RA <= 0.0f || exp_AA <= 0.0f) {
-            return 0.0f;
-        }
-
-        float min_ratio = 1.0f;
         min_ratio = std::min(min_ratio, obs_RA / exp_RA);
-        min_ratio = std::min(min_ratio, obs_AA / exp_AA);
-
-        // Forbidden: R/R, A/R
-        float forbidden_penalty = obs_RR + obs_AR;
-
-        reliability = min_ratio - forbidden_penalty;
-        return std::max(0.0f, reliability);
+        return std::max(0.0f, min_ratio - obs_AA);
     }
 
-    // Unknown relation type
     return 0.0f;
 }
 
@@ -286,34 +156,10 @@ struct Classification {
 
 // Number of reads that "support" a given relation type
 int supportingReadsForRelation(const SNPEntry& e, const std::string& relType) {
-    if (relType == "snp1_before_snp2") {
-        // Required: R/R, A/R, A/A
-        return e.REF_REF + e.ALT_REF + e.ALT_ALT;
-    }
-    if (relType == "snp2_before_snp1") {
-        // Required: R/R, R/A, A/A
-        return e.REF_REF + e.REF_ALT + e.ALT_ALT;
-    }
-    if (relType == "cooccurring") {
-        // Required: R/R, A/A
-        return e.REF_REF + e.ALT_ALT;
-    }
-    if (relType == "cooccurring_loss") {
-        // Required: A/A only
-        return e.ALT_ALT;
-    }
-    if (relType == "divergent") {
-        // Required: A/R, R/A
-        return e.ALT_REF + e.REF_ALT;
-    }
-    if (relType == "snp1_before_snp2_loss") {
-        // Required: A/R, A/A
-        return e.ALT_REF + e.ALT_ALT;
-    }
-    if (relType == "snp2_before_snp1_loss") {
-        // Required: R/A, A/A
-        return e.REF_ALT + e.ALT_ALT;
-    }
+    if (relType == "snp1_before_snp2") return e.ALT_REF + e.ALT_ALT;
+    if (relType == "snp2_before_snp1") return e.REF_ALT + e.ALT_ALT;
+    if (relType == "cooccurring") return e.ALT_ALT;
+    if (relType == "divergent") return e.ALT_REF + e.REF_ALT;
     return 0;
 }
 
@@ -360,10 +206,7 @@ Classification classifyEntry(const SNPEntry& e, int minReads, float coverageScal
     reliabilities["snp1_before_snp2"] = calculateReliabilityForRelationship(e, "snp1_before_snp2", minReads);
     reliabilities["snp2_before_snp1"] = calculateReliabilityForRelationship(e, "snp2_before_snp1", minReads);
     reliabilities["cooccurring"] = calculateReliabilityForRelationship(e, "cooccurring", minReads);
-    reliabilities["cooccurring_loss"] = calculateReliabilityForRelationship(e, "cooccurring_loss", minReads);
     reliabilities["divergent"] = calculateReliabilityForRelationship(e, "divergent", minReads);
-    reliabilities["snp1_before_snp2_loss"] = calculateReliabilityForRelationship(e, "snp1_before_snp2_loss", minReads);
-    reliabilities["snp2_before_snp1_loss"]  = calculateReliabilityForRelationship(e, "snp2_before_snp1_loss", minReads);
 
     // --- Compute ratio-based distance ---
     const float r = vaf_ratio(e.vaf1, e.vaf2);
@@ -380,13 +223,10 @@ Classification classifyEntry(const SNPEntry& e, int minReads, float coverageScal
     // --- Apply priors (multiplicative) ---
     // Cooccurring gets boosted when VAFs are similar (p_co close to 1)
     reliabilities["cooccurring"]      *= p_co_eff;
-    reliabilities["cooccurring_loss"] *= p_co_eff;
 
     // Timing gets punished when VAFs are similar
     reliabilities["snp1_before_snp2"]      *= p_tim_eff;
     reliabilities["snp2_before_snp1"]      *= p_tim_eff;
-    reliabilities["snp1_before_snp2_loss"] *= p_tim_eff;
-    reliabilities["snp2_before_snp1_loss"] *= p_tim_eff;
 
     // Find best and second-best pattern scores
     string best_type = "error";
@@ -415,8 +255,8 @@ Classification classifyEntry(const SNPEntry& e, int minReads, float coverageScal
         best_type = "error";
         final_reliability = 0.0f;
     } else {
-        // Weight by the number of reads that support the chosen relation,
-        // scaled by the median coverage (coverageScale) for this file.
+        // Weight by ALT-informative support, scaled by the median ALT-informative
+        // coverage for this file.
         int support  = supportingReadsForRelation(e, best_type);
         float weight = coverageWeight(support, coverageScale);
         final_reliability = base_reliability * weight;
@@ -462,8 +302,10 @@ void processFile(
         SNPEntry e = parseLine(line);
         if (!e.valid) continue;
 
-        // Use TOTAL read count as a coverage proxy
-        coverages.push_back(e.TOTAL);
+        const int informative_reads = e.ALT_ALT + e.ALT_REF + e.REF_ALT;
+        if (informative_reads > 0) {
+            coverages.push_back(informative_reads);
+        }
     }
 
     infile.close();
@@ -490,9 +332,6 @@ void processFile(
     ofstream f_div(base + "_divergent.txt");
     ofstream f_snp1(base + "_snp1_before_snp2.txt");
     ofstream f_snp2(base + "_snp2_before_snp1.txt");
-    ofstream f_snp1_loss(base + "_snp1_before_snp2_loss.txt");
-    ofstream f_snp2_loss(base + "_snp2_before_snp1_loss.txt");
-    ofstream f_co_loss(base + "_cooccurring_loss.txt");
     ofstream f_err(base + "_errors.txt");
 
     while (getline(infile, line)) {
@@ -535,12 +374,6 @@ void processFile(
             f_snp1 << formatted << '\n';
         } else if (cls.type == "snp2_before_snp1") {
             f_snp2 << formatted << '\n';
-        } else if (cls.type == "snp1_before_snp2_loss") {
-            f_snp1_loss << formatted << '\n';
-        } else if (cls.type == "snp2_before_snp1_loss") {
-            f_snp2_loss << formatted << '\n';
-        } else if (cls.type == "cooccurring_loss") {
-            f_co_loss << formatted << '\n';
         } else {
             // cls.type == "error" or final_reliability <= 0
             f_err << formatted << '\n';
@@ -552,9 +385,6 @@ void processFile(
     f_div.close();
     f_snp1.close();
     f_snp2.close();
-    f_snp1_loss.close();
-    f_snp2_loss.close();
-    f_co_loss.close();
     f_err.close();
 
     if (divergentSameHp) {

@@ -124,32 +124,25 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
     This function looks for:
 
         base + "_cooccurring.txt"
-        base + "_cooccurring_loss.txt"
         base + "_divergent.txt"
         base + "_snp1_before_snp2.txt"
         base + "_snp2_before_snp1.txt"
-        base + "_snp1_before_snp2_loss.txt"
-        base + "_snp2_before_snp1_loss.txt"
 
     and ignores base + "_errors.txt".
     """
 
-    # Map file suffix → (relation, loss_flag, orientation)
+    # Map file suffix → (relation, orientation).
     # orientation is only meaningful for timing; for undirected, use "undirected".
-    suffixes: Dict[str, Tuple[str, bool, str]] = {
-        "_cooccurring.txt": ("cooccurring", False, "undirected"),
-        "_cooccurring_loss.txt": ("cooccurring", True, "undirected"),
-        "_divergent.txt": ("divergent", False, "undirected"),
-        "_snp1_before_snp2.txt": ("timing", False, "1_before_2"),
-        "_snp2_before_snp1.txt": ("timing", False, "2_before_1"),
-        "_snp1_before_snp2_loss.txt": ("timing", True, "1_before_2"),
-        "_snp2_before_snp1_loss.txt": ("timing", True, "2_before_1"),
-        # "_errors.txt" is intentionally not used
+    suffixes: Dict[str, Tuple[str, str]] = {
+        "_cooccurring.txt": ("cooccurring", "undirected"),
+        "_divergent.txt": ("divergent", "undirected"),
+        "_snp1_before_snp2.txt": ("timing", "1_before_2"),
+        "_snp2_before_snp1.txt": ("timing", "2_before_1"),
     }
 
     edges: List[Edge] = []
 
-    for suffix, (relation, loss, orientation) in suffixes.items():
+    for suffix, (relation, orientation) in suffixes.items():
         path = base_path + suffix
         if not os.path.exists(path):
             continue
@@ -207,7 +200,6 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                         u=u,
                         v=v,
                         relation=relation,
-                        loss=loss,
                         reliability=reliability,
                         alt_alt=alt_alt,
                         alt_ref=alt_ref,

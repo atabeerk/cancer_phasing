@@ -329,17 +329,6 @@ def process_chromosome(
         for relation in RELATIONS:
             rec = chrom_edge_hap[relation]
             chrom_log.write(f"\n{relation_label[relation]} edges (accepted):        {rec['total']}\n")
-            chrom_log.write(
-                f"  Without loss:                      {rec['without_loss']}"
-                + (f"  ({_pct(rec['without_loss'], rec['total'])} of relation)" if rec["total"] > 0 else "")
-                + "\n"
-            )
-            chrom_log.write(
-                f"  With loss:                         {rec['with_loss']}"
-                + (f"  ({_pct(rec['with_loss'], rec['total'])} of relation)" if rec["total"] > 0 else "")
-                + "\n"
-            )
-
             if haplotag_detected != 0:
                 chrom_log.write(
                     f"  Same haplotype:                    {rec['same_haplotype']}"

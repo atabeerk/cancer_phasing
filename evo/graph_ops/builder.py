@@ -217,24 +217,19 @@ class GraphBuilder:
             "u": new_edge.u,
             "v": new_edge.v,
             "relation": new_edge.relation,
-            "loss": new_edge.loss,
             "reliability": new_edge.reliability,
             "read_counts": read_counts_str,   # ALT_ALT/ALT_REF/REF_ALT/REF_REF
             "reason": reason,
             "conflict_u": None,
             "conflict_v": None,
-            "conflict_relation_label": None,  # e.g. "timing_loss", "cooccurring"
+            "conflict_relation_label": None,
             "conflict_reliability": None,
         }
 
         if conflict_edge is not None:
             rec["conflict_u"] = conflict_edge.u
             rec["conflict_v"] = conflict_edge.v
-            # Combine relation + loss into a single label
-            if conflict_edge.loss:
-                rec["conflict_relation_label"] = f"{conflict_edge.relation}_loss"
-            else:
-                rec["conflict_relation_label"] = conflict_edge.relation
+            rec["conflict_relation_label"] = conflict_edge.relation
             rec["conflict_reliability"] = conflict_edge.reliability
 
         self.inconsistencies.append(rec)

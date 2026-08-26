@@ -83,8 +83,6 @@ def _new_edge_haplotype_counters():
     return {
         relation: {
             "total": 0,
-            "without_loss": 0,
-            "with_loss": 0,
             "same_haplotype": 0,
             "different_haplotype": 0,
             "at_least_one_unknown": 0,
@@ -113,11 +111,6 @@ def _update_edge_haplotype_counters(counters, edge):
         return
     rec = counters[rel]
     rec["total"] += 1
-    if edge.loss:
-        rec["with_loss"] += 1
-    else:
-        rec["without_loss"] += 1
-
     hu = _normalize_hp(edge.hap_u)
     hv = _normalize_hp(edge.hap_v)
     if hu == "UNKNOWN" or hv == "UNKNOWN":
@@ -432,8 +425,6 @@ def main():
             "[graph_ops_edge_hap] "
             f"relation={relation} "
             f"total={rec['total']} "
-            f"without_loss={rec['without_loss']} "
-            f"with_loss={rec['with_loss']} "
             f"same_haplotype={rec['same_haplotype']} "
             f"different_haplotype={rec['different_haplotype']} "
             f"at_least_one_unknown={rec['at_least_one_unknown']} "

@@ -61,8 +61,6 @@ def new_edge_haplotype_summary():
     return {
         relation: {
             "total": 0,
-            "without_loss": 0,
-            "with_loss": 0,
             "same_haplotype": 0,
             "different_haplotype": 0,
             "at_least_one_unknown": 0,
