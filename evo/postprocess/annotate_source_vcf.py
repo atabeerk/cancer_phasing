@@ -340,21 +340,35 @@ def iter_vcf_records(vcf_path: Path):
             yield chrom, pos
 
 
+def chromosome_graph_dirs(main_out_dir: Path) -> List[Path]:
+    """Return per-chromosome graph directories under a pipeline output."""
+    return sorted(
+        path
+        for path in main_out_dir.glob("*_out/graphs")
+        if path.is_dir()
+    )
+
+
+
 def find_graph_files(main_out_dir: Path) -> List[Path]:
-    """Recursively find only uncondensed chunk_*.json graphs; skip *_condensed.json."""
+    """Find primary uncondensed chromosome graphs."""
     out: List[Path] = []
-    for p in main_out_dir.rglob("chunk_*.json"):
-        if p.name.endswith("_condensed.json"):
-            continue
-        out.append(p)
+    for graphs_dir in chromosome_graph_dirs(main_out_dir):
+        chrom = graphs_dir.parent.name[:-4]
+        path = graphs_dir / f"{chrom}.json"
+        if path.is_file():
+            out.append(path)
     return sorted(out)
 
 
 def find_condensed_graph_files(main_out_dir: Path) -> List[Path]:
-    """Recursively find condensed graphs: chunk_*_condensed.json"""
+    """Find condensed chromosome graphs."""
     out: List[Path] = []
-    for p in main_out_dir.rglob("chunk_*_condensed.json"):
-        out.append(p)
+    for graphs_dir in chromosome_graph_dirs(main_out_dir):
+        chrom = graphs_dir.parent.name[:-4]
+        path = graphs_dir / f"{chrom}_condensed.json"
+        if path.is_file():
+            out.append(path)
     return sorted(out)
 
 
@@ -662,29 +676,33 @@ def load_chunk_node_haplotypes(graphs_dir: Path) -> Dict[str, Dict[int, str]]:
     if not graphs_dir.is_dir():
         return out
 
-    for jp in sorted(graphs_dir.glob("chunk_*.json")):
-        if jp.name.endswith("_condensed.json"):
-            continue
-        chunk_base = jp.stem
-        try:
-            with open(jp, "rt", encoding="utf-8") as f:
-                obj = json.load(f)
-        except Exception:
-            continue
+    chrom_out_name = graphs_dir.parent.name
+    if not chrom_out_name.endswith("_out"):
+        return out
+    jp = graphs_dir / f"{chrom_out_name[:-4]}.json"
+    if not jp.is_file():
+        return out
 
-        nodes = ((obj.get("elements") or {}).get("nodes") or [])
-        pos_to_hp: Dict[int, str] = {}
-        for n in nodes:
-            data = n.get("data", {}) if isinstance(n, dict) else {}
-            pos = data.get("position")
-            if pos is None:
-                continue
-            try:
-                pos_i = int(pos)
-            except (TypeError, ValueError):
-                continue
-            pos_to_hp[pos_i] = normalize_haplotype_tag(data.get("haplotype"))
-        out[chunk_base] = pos_to_hp
+    chunk_base = jp.stem
+    try:
+        with open(jp, "rt", encoding="utf-8") as f:
+            obj = json.load(f)
+    except Exception:
+        return out
+
+    nodes = ((obj.get("elements") or {}).get("nodes") or [])
+    pos_to_hp: Dict[int, str] = {}
+    for n in nodes:
+        data = n.get("data", {}) if isinstance(n, dict) else {}
+        pos = data.get("position")
+        if pos is None:
+            continue
+        try:
+            pos_i = int(pos)
+        except (TypeError, ValueError):
+            continue
+        pos_to_hp[pos_i] = normalize_haplotype_tag(data.get("haplotype"))
+    out[chunk_base] = pos_to_hp
     return out
 
 
@@ -958,7 +976,7 @@ def main():
         pos_deltas = parse_pos_deltas(args.pos_deltas)
         if not uncondensed_files:
             raise SystemExit(
-                f"No uncondensed chunk_*.json graphs found under {main_out} "
+                f"No uncondensed chromosome graph JSON files found under {main_out} "
                 f"(note: *_condensed.json are intentionally skipped)."
             )
         vcf_files = find_vcf_files(vcf_dir, args.vcf_recursive)

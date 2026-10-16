@@ -2,8 +2,8 @@ import os
 import sys
 import argparse
 import csv
+import glob
 import time
-from bisect import bisect_right
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
@@ -19,64 +19,84 @@ from component_stats import compute_component_statistics_rows, append_component_
 RELATIONS = ("cooccurring", "timing", "divergent")
 
 
-def _partition_component_rows(rows, chunk_records):
-    """
-    Start from the original consecutive batch ranges. If a connected component
-    crosses a batch end, extend that output region to the component's maximum
-    coordinate and start the next region at the following coordinate.
-    """
-    batch_ranges = sorted((int(start), int(end)) for _base, start, end in chunk_records)
-    if not batch_ranges:
-        return []
+def merge_chunk_outputs_by_chromosome(chunk_dir, bases):
+    """Merge all text outputs for each chromosome in genomic chunk order."""
+    merged_bases = []
+    chromosome_groups = group_chunk_bases_by_chromosome(bases)
 
-    batch_ends = [end for _start, end in batch_ranges]
-    ordered_rows = sorted(
-        rows,
-        key=lambda row: (
-            int(row["min_pos"]),
-            int(row["max_pos"]),
-            int(row["component_id"]),
-        ),
-    )
+    for chrom, chunk_records in chromosome_groups.items():
+        chromosome_base = os.path.join(chunk_dir, chrom)
+        source_bases = [record[0] for record in chunk_records]
+        suffixes = set()
+        source_paths = set()
+        for source_base in source_bases:
+            for source_path in glob.glob(source_base + "*.txt"):
+                suffix = source_path[len(source_base):]
+                if suffix == ".txt" or suffix.startswith("_"):
+                    suffixes.add(suffix)
+                    source_paths.add(source_path)
 
-    partitions = []
-    row_index = 0
-    batch_index = 0
-    region_start = batch_ranges[0][0]
+        if ".txt" not in suffixes:
+            raise FileNotFoundError(
+                f"Missing canonical chunk comparison file for chromosome {chrom}"
+            )
 
-    while batch_index < len(batch_ranges):
-        region_end = batch_ranges[batch_index][1]
-        partition_rows = []
+        temporary_outputs = []
+        installed_outputs = []
+        try:
+            for suffix in sorted(suffixes):
+                output_path = chromosome_base + suffix
+                if output_path in source_paths:
+                    raise FileExistsError(
+                        "Chromosome-wide output collides with a regional input: "
+                        f"{output_path}"
+                    )
+                if os.path.exists(output_path):
+                    raise FileExistsError(
+                        f"Chromosome-wide output already exists: {output_path}"
+                    )
+                temporary_path = output_path + ".merge_tmp"
+                temporary_outputs.append((temporary_path, output_path))
+                with open(temporary_path, "wb") as output_handle:
+                    for source_base in source_bases:
+                        source_path = source_base + suffix
+                        if not os.path.exists(source_path):
+                            continue
+                        with open(source_path, "rb") as input_handle:
+                            while True:
+                                block = input_handle.read(1024 * 1024)
+                                if not block:
+                                    break
+                                output_handle.write(block)
 
-        # region_end may grow while rows are consumed. That closure ensures a
-        # whole component is kept and no later component begins inside a region
-        # assigned to an earlier file.
-        while (
-            row_index < len(ordered_rows)
-            and int(ordered_rows[row_index]["min_pos"]) <= region_end
-        ):
-            row = ordered_rows[row_index]
-            if int(row["min_pos"]) < region_start:
-                raise AssertionError("Connected component assigned to two regions")
-            partition_rows.append(row)
-            region_end = max(region_end, int(row["max_pos"]))
-            row_index += 1
+            for temporary_path, output_path in temporary_outputs:
+                os.replace(temporary_path, output_path)
+                installed_outputs.append(output_path)
+        except Exception:
+            for temporary_path, _output_path in temporary_outputs:
+                try:
+                    os.remove(temporary_path)
+                except FileNotFoundError:
+                    pass
+            for output_path in installed_outputs:
+                try:
+                    os.remove(output_path)
+                except FileNotFoundError:
+                    pass
+            raise
 
-        partitions.append((region_start, region_end, partition_rows))
-        region_start = region_end + 1
-        batch_index = bisect_right(batch_ends, region_end)
+        for source_path in source_paths:
+            os.remove(source_path)
 
-    if row_index != len(ordered_rows):
-        raise ValueError("Graph components extend beyond the final batch range")
+        print(
+            f"[graph_ops] Merged {len(chunk_records)} regional chunk base(s) "
+            f"for {chrom} into {os.path.basename(chromosome_base)}",
+            flush=True,
+        )
+        merged_bases.append(chromosome_base)
 
-    return partitions
+    return sorted(merged_bases)
 
-
-def _component_partition_nodes(rows):
-    nodes = set()
-    for row in rows:
-        nodes.update(int(token) for token in str(row["nodes"]).split(",") if token)
-    return nodes
 
 
 def _new_edge_haplotype_counters():
@@ -224,7 +244,7 @@ def main():
         chrom_t0 = time.monotonic()
         core_start = min(record[1] for record in chunk_records)
         core_end = max(record[2] for record in chunk_records)
-        basename = f"chunk_{chrom}_{core_start}_{core_end}"
+        basename = chrom
         print(
             f"[graph_ops] Processing chromosome: {chrom} "
             f"chunks={len(chunk_records)} output_base={basename}", flush=True
@@ -284,14 +304,9 @@ def main():
             chunk_base=basename,
             chromosome=chrom,
         )
-        partitions = _partition_component_rows(component_rows, chunk_records)
-        partition_specs = []
-        for partition_start, partition_end, partition_rows in partitions:
-            partition_nodes = _component_partition_nodes(partition_rows)
-            partition_base = f"chunk_{chrom}_{partition_start}_{partition_end}"
-            partition_specs.append(
-                (partition_base, partition_start, partition_end, partition_nodes, partition_rows)
-            )
+        partition_specs = [
+            (basename, core_start, core_end, set(builder.nodes), component_rows)
+        ]
 
         partition_paths = []
         written_accepted_edges = 0
@@ -377,6 +392,8 @@ def main():
             f"\nchromosome_elapsed={time.monotonic() - chrom_t0:.3f}s",
             flush=True,
         )
+
+    merge_chunk_outputs_by_chromosome(chunk_dir, bases)
 
     # ---- Mutation connectivity statistics ----
     total_snvs = args.total_snvs

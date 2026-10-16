@@ -8,7 +8,7 @@ Endpoint:
 Body:
   {
     "outdir": "/path/to/main_out",
-    "file_rel": "chr1_out/graphs/chunk_chr1_..._condensed.json",
+    "file_rel": "chr1_out/graphs/chr1_condensed.json",
     "open_condensed": true,
     "open_uncondensed": true
   }

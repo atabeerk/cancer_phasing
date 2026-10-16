@@ -12,6 +12,7 @@ if str(GRAPH_OPS_DIR) not in sys.path:
     sys.path.insert(0, str(GRAPH_OPS_DIR))
 
 from parsing import group_chunk_bases_by_chromosome, parse_chunk_base
+from main import merge_chunk_outputs_by_chromosome
 
 
 def relation_line(chrom, pos1, pos2, reliability):
@@ -42,6 +43,82 @@ class ChunkGroupingTests(unittest.TestCase):
             [record[1] for record in groups["chr2"]],
             [1, 10000001],
         )
+
+
+    def test_merge_chunk_outputs_preserves_suffixes_and_genomic_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            chunks = Path(tmp)
+            left = chunks / "chunk_chrT_1_10000000"
+            right = chunks / "chunk_chrT_10000001_20000000"
+            left.with_suffix(".txt").write_text("raw-left\n", encoding="utf-8")
+            right.with_suffix(".txt").write_text("raw-right\n", encoding="utf-8")
+            Path(str(left) + "_cooccurring.txt").write_text(
+                "co-left\n", encoding="utf-8"
+            )
+            Path(str(right) + "_cooccurring.txt").write_text(
+                "co-right\n", encoding="utf-8"
+            )
+            Path(str(right) + "_errors.txt").write_text(
+                "error-right\n", encoding="utf-8"
+            )
+            unrelated = chunks / "notes.txt"
+            unrelated.write_text("keep\n", encoding="utf-8")
+
+            merged = merge_chunk_outputs_by_chromosome(
+                str(chunks), [str(right), str(left)]
+            )
+
+            merged_base = chunks / "chrT"
+            self.assertEqual(merged, [str(merged_base)])
+            self.assertEqual(
+                merged_base.with_suffix(".txt").read_text(encoding="utf-8"),
+                "raw-left\nraw-right\n",
+            )
+            self.assertEqual(
+                Path(str(merged_base) + "_cooccurring.txt").read_text(
+                    encoding="utf-8"
+                ),
+                "co-left\nco-right\n",
+            )
+            self.assertEqual(
+                Path(str(merged_base) + "_errors.txt").read_text(encoding="utf-8"),
+                "error-right\n",
+            )
+            self.assertFalse(left.with_suffix(".txt").exists())
+            self.assertFalse(right.with_suffix(".txt").exists())
+            self.assertFalse(Path(str(left) + "_cooccurring.txt").exists())
+            self.assertFalse(Path(str(right) + "_cooccurring.txt").exists())
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep\n")
+
+
+    def test_merge_single_chunk_uses_chromosome_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            chunks = Path(tmp)
+            source = chunks / "chunk_chrT_1_10000000"
+            source.with_suffix(".txt").write_text("raw\n", encoding="utf-8")
+            Path(str(source) + "_timing.txt").write_text(
+                "timing\n", encoding="utf-8"
+            )
+
+            merged = merge_chunk_outputs_by_chromosome(
+                str(chunks), [str(source)]
+            )
+
+            merged_base = chunks / "chrT"
+            self.assertEqual(merged, [str(merged_base)])
+            self.assertEqual(
+                merged_base.with_suffix(".txt").read_text(encoding="utf-8"),
+                "raw\n",
+            )
+            self.assertEqual(
+                Path(str(merged_base) + "_timing.txt").read_text(
+                    encoding="utf-8"
+                ),
+                "timing\n",
+            )
+            self.assertFalse(source.with_suffix(".txt").exists())
+            self.assertFalse(Path(str(source) + "_timing.txt").exists())
+
 
 
 class ChromosomeGraphIntegrationTests(unittest.TestCase):
@@ -83,46 +160,40 @@ class ChromosomeGraphIntegrationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
             graph_paths = sorted(
-                path for path in graphs.glob("chunk_*.json")
+                path for path in graphs.glob("*.json")
                 if not path.name.endswith("_condensed.json")
             )
             self.assertEqual(
                 [path.name for path in graph_paths],
-                [
-                    "chunk_chrT_10000003_20000000.json",
-                    "chunk_chrT_1_10000002.json",
-                ],
+                ["chrT.json"],
             )
-            graphs_by_name = {
-                path.name: json.loads(path.read_text(encoding="utf-8"))
-                for path in graph_paths
-            }
-            graph = graphs_by_name["chunk_chrT_1_10000002.json"]
+            graph = json.loads(graph_paths[0].read_text(encoding="utf-8"))
             node_ids = {
                 int(node["data"]["id"])
                 for node in graph["elements"]["nodes"]
             }
             self.assertEqual(node_ids, {9999999, 10000001, 10000002})
             self.assertGreaterEqual(min(node_ids), 1)
-            self.assertLessEqual(max(node_ids), 10000002)
-            self.assertEqual(
-                graphs_by_name["chunk_chrT_10000003_20000000.json"]["elements"],
-                {"nodes": [], "edges": []},
-            )
+            self.assertLessEqual(max(node_ids), 20000000)
 
             stats_path = root / "component_statistics.txt"
             with stats_path.open(newline="", encoding="utf-8") as handle:
                 rows = list(csv.DictReader(handle, delimiter="\t"))
             self.assertEqual(len(rows), 1)
             self.assertEqual(int(rows[0]["num_nodes"]), 3)
-            self.assertEqual(rows[0]["chunk_base"], "chunk_chrT_1_10000002")
+            self.assertEqual(rows[0]["chunk_base"], "chrT")
 
-            condensed_paths = sorted(graphs.glob("chunk_*_condensed.json"))
+            condensed_paths = sorted(graphs.glob("*_condensed.json"))
             self.assertEqual(
                 [path.name for path in condensed_paths],
+                ["chrT_condensed.json"],
+            )
+            chunk_paths = sorted(path.name for path in chunks.glob("*.txt"))
+            self.assertEqual(
+                chunk_paths,
                 [
-                    "chunk_chrT_10000003_20000000_condensed.json",
-                    "chunk_chrT_1_10000002_condensed.json",
+                    "chrT.txt",
+                    "chrT_cooccurring.txt",
                 ],
             )
 
@@ -159,7 +230,7 @@ class ChromosomeGraphIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-            base_name = "chunk_chrT_1_10000000"
+            base_name = "chrT"
             graph = json.loads(
                 (graphs / f"{base_name}.json").read_text(encoding="utf-8")
             )
@@ -186,7 +257,7 @@ class ChromosomeGraphIntegrationTests(unittest.TestCase):
                 {1, 2},
             )
 
-    def test_disconnected_components_are_written_to_separate_regions(self):
+    def test_disconnected_components_are_written_to_one_chromosome_graph(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             chunks = root / "chunks"
@@ -222,31 +293,20 @@ class ChromosomeGraphIntegrationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
             graph_paths = sorted(
-                path for path in graphs.glob("chunk_*.json")
+                path for path in graphs.glob("*.json")
                 if not path.name.endswith("_condensed.json")
             )
             self.assertEqual(
                 [path.name for path in graph_paths],
-                [
-                    "chunk_chrT_10000001_20000000.json",
-                    "chunk_chrT_1_10000000.json",
-                ],
+                ["chrT.json"],
             )
-            node_sets = []
-            for path in graph_paths:
-                graph = json.loads(path.read_text(encoding="utf-8"))
-                node_sets.append({
+            graph = json.loads(graph_paths[0].read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
                     int(node["data"]["id"])
                     for node in graph["elements"]["nodes"]
-                })
-                _prefix, start, end = path.stem.rsplit("_", 2)
-                self.assertTrue(all(
-                    int(start) <= node <= int(end)
-                    for node in node_sets[-1]
-                ))
-            self.assertEqual(
-                node_sets,
-                [{15000000, 15000001}, {1, 2}],
+                },
+                {1, 2, 15000000, 15000001},
             )
 
     def test_component_wider_than_target_is_not_split(self):
@@ -281,31 +341,20 @@ class ChromosomeGraphIntegrationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
             graph_paths = sorted(
-                path for path in graphs.glob("chunk_*.json")
+                path for path in graphs.glob("*.json")
                 if not path.name.endswith("_condensed.json")
             )
             self.assertEqual(
                 [path.name for path in graph_paths],
-                [
-                    "chunk_chrT_12000002_20000000.json",
-                    "chunk_chrT_1_12000001.json",
-                ],
+                ["chrT.json"],
             )
-            graphs_by_name = {
-                path.name: json.loads(path.read_text(encoding="utf-8"))
-                for path in graph_paths
-            }
+            graph = json.loads(graph_paths[0].read_text(encoding="utf-8"))
             self.assertEqual(
                 {
                     int(node["data"]["id"])
-                    for node in graphs_by_name["chunk_chrT_1_12000001.json"]
-                    ["elements"]["nodes"]
+                    for node in graph["elements"]["nodes"]
                 },
                 {1, 12000001},
-            )
-            self.assertEqual(
-                graphs_by_name["chunk_chrT_12000002_20000000.json"]["elements"],
-                {"nodes": [], "edges": []},
             )
 
     def test_empty_chromosome_graph_still_writes_json_pair(self):
@@ -333,14 +382,15 @@ class ChromosomeGraphIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-            graph_path = graphs / "chunk_chrT_1_10000000.json"
-            condensed_path = graphs / "chunk_chrT_1_10000000_condensed.json"
+            graph_path = graphs / "chrT.json"
+            condensed_path = graphs / "chrT_condensed.json"
             self.assertTrue(graph_path.exists())
             self.assertTrue(condensed_path.exists())
             graph = json.loads(graph_path.read_text(encoding="utf-8"))
             condensed = json.loads(condensed_path.read_text(encoding="utf-8"))
             self.assertEqual(graph["elements"], {"nodes": [], "edges": []})
             self.assertEqual(condensed["elements"], {"nodes": [], "edges": []})
+
 
 
 if __name__ == "__main__":

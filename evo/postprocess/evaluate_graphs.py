@@ -2,17 +2,15 @@
 """
 evaluate_edges.py
 
-Evaluate timing/cooccurrence/divergent edges in uncondensed chunk graphs against a ground-truth tree.
+Evaluate timing/cooccurrence/divergent edges in chromosome graphs against a ground-truth tree.
 
 Directory layout expected:
   OUTDIR/
-    12_out/graphs/*.json
+    12_out/graphs/12.json
     12_pre/...
-    chr3_out/graphs/**/*.json
+    chr3_out/graphs/chr3.json
     chr3_pre/...
     ...
-
-We ignore any graph JSON whose filename ends with "_condensed.json".
 
 Node entries are expected to include:
   node["data"]["source_vcf"] = "N1.fixed.merged.withcontigs.sorted"
@@ -225,10 +223,6 @@ def node_label_from_source_vcf(source_vcf: Optional[str]) -> Optional[str]:
 
 def chromosome_from_out_folder(out_folder_name: str) -> str:
     return out_folder_name[:-4] if out_folder_name.endswith("_out") else out_folder_name
-
-
-def should_skip_json(path: Path) -> bool:
-    return path.name.endswith("_condensed.json")
 
 
 # ---------------- Data structures ----------------
@@ -687,30 +681,30 @@ def main() -> None:
         if not graphs_dir.is_dir():
             continue
 
-        for jp in sorted(graphs_dir.rglob("*.json")):
-            if should_skip_json(jp):
-                continue
-            try:
-                eval_graph_file(
-                    json_path=jp,
-                    fallback_chr_label=chr_label,
-                    parent_of=parent_of,
-                    tree_nodes=tree_nodes,
-                    depth=depth,
-                    agg_by_chr=agg_by_chr,
-                    agg_all=agg_all,
-                    inconsistent_timing_rows=inconsistent_timing_rows,
-                    inconsistent_cooccur_rows=inconsistent_cooccur_rows,
-                    inconsistent_divergent_rows=inconsistent_divergent_rows,
-                    timing_pair_counts=timing_pair_counts,
-                    cooccur_pair_counts=cooccur_pair_counts,
-                    divergent_pair_counts=divergent_pair_counts,
-                    vcfpair_relation_counts=vcfpair_relation_counts,
-                )
-            except json.JSONDecodeError as e:
-                raise SystemExit(f"JSON parse error in {jp}: {e}") from e
-            except Exception as e:
-                raise SystemExit(f"Error processing {jp}: {e}") from e
+        jp = graphs_dir / f"{chr_label}.json"
+        if not jp.is_file():
+            continue
+        try:
+            eval_graph_file(
+                json_path=jp,
+                fallback_chr_label=chr_label,
+                parent_of=parent_of,
+                tree_nodes=tree_nodes,
+                depth=depth,
+                agg_by_chr=agg_by_chr,
+                agg_all=agg_all,
+                inconsistent_timing_rows=inconsistent_timing_rows,
+                inconsistent_cooccur_rows=inconsistent_cooccur_rows,
+                inconsistent_divergent_rows=inconsistent_divergent_rows,
+                timing_pair_counts=timing_pair_counts,
+                cooccur_pair_counts=cooccur_pair_counts,
+                divergent_pair_counts=divergent_pair_counts,
+                vcfpair_relation_counts=vcfpair_relation_counts,
+            )
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"JSON parse error in {jp}: {e}") from e
+        except Exception as e:
+            raise SystemExit(f"Error processing {jp}: {e}") from e
 
     prefix = args.out_prefix
 

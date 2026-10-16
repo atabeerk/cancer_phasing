@@ -20,7 +20,13 @@ MAX_CHAIN_NODES = 20
 
 
 def find_condensed_graph_files(main_out_dir: Path) -> list[Path]:
-    return sorted(main_out_dir.rglob("chunk_*_condensed.json"))
+    paths: list[Path] = []
+    for graphs_dir in sorted(main_out_dir.glob("*_out/graphs")):
+        chrom = graphs_dir.parent.name[:-4]
+        path = graphs_dir / f"{chrom}_condensed.json"
+        if path.is_file():
+            paths.append(path)
+    return sorted(paths)
 
 
 def load_graph(path: Path) -> tuple[dict, list, list]:

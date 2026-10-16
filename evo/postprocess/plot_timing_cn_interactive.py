@@ -492,9 +492,13 @@ def load_node_ranks(outdir: Path, ranks_tsv: Path) -> List[RankedNode]:
 
 def load_uncondensed_mutation_vaf_points(outdir: Path) -> List[MutationVafPoint]:
     out: List[MutationVafPoint] = []
-    for jp in sorted(outdir.rglob("chunk_*.json")):
-        if jp.name.endswith("_condensed.json"):
-            continue
+    graph_paths = (
+        path
+        for graphs_dir in sorted(outdir.glob("*_out/graphs"))
+        for path in [graphs_dir / f"{graphs_dir.parent.name[:-4]}.json"]
+        if path.is_file()
+    )
+    for jp in graph_paths:
         try:
             with jp.open("rt", encoding="utf-8") as f:
                 obj = json.load(f)
