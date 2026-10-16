@@ -405,7 +405,7 @@ def load_needed_sites(graph_files: List[Path]) -> Tuple[Dict[str, Set[int]], int
 
 
 def parse_pos_deltas(s: str) -> List[int]:
-    """Parse comma-separated list like '0,-1,1' into [0, -1, 1]"""
+    """Parse comma-separated position deltas into integers."""
     deltas: List[int] = []
     for tok in s.split(","):
         tok = tok.strip()
@@ -923,10 +923,10 @@ def main():
     ap.add_argument(
         "--pos_deltas",
         type=str,
-        default="0,-1,1",
+        default="0",
         help=(
             "Comma-separated list of position deltas to try when matching VCF POS to graph node position. "
-            "Graph_pos = VCF_POS + delta. Default tries 0,-1,1."
+            "Graph_pos = VCF_POS + delta. Default matches the exact coordinate only (0)."
         ),
     )
     ap.add_argument(

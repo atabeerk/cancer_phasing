@@ -93,7 +93,6 @@ bool readVCF(
         return false;
     }
 
-    const int numSamples = bcf_hdr_nsamples(hdr);
     while (bcf_read(fp, hdr, rec) == 0) {
         bcf_unpack(rec, BCF_UN_ALL);
         if (rec->n_allele < 2 || rec->d.allele[0][0] == '\0' ||
@@ -106,56 +105,7 @@ bool readVCF(
         s.pos = rec->pos + 1;
         s.ref = rec->d.allele[0][0];
         s.alt = rec->d.allele[1][0];
-
-        bool vafSet = false;
-        if (selectedSampleIdx >= 0) {
-            int32_t* ad = nullptr;
-            int nad = 0;
-            const int nvalsTotal =
-                bcf_get_format_int32(hdr, rec, "AD", &ad, &nad);
-            if (nvalsTotal > 0 && numSamples > 0) {
-                const int valsPerSample = nvalsTotal / numSamples;
-                const int idx0 = selectedSampleIdx * valsPerSample;
-                if (valsPerSample >= 2 && idx0 + 1 < nvalsTotal) {
-                    const int32_t refDepth = ad[idx0];
-                    const int32_t altDepth = ad[idx0 + 1];
-                    const bool refOk =
-                        refDepth != bcf_int32_missing &&
-                        refDepth != bcf_int32_vector_end;
-                    const bool altOk =
-                        altDepth != bcf_int32_missing &&
-                        altDepth != bcf_int32_vector_end;
-                    if (refOk && altOk) {
-                        const int totalDepth =
-                            static_cast<int>(refDepth + altDepth);
-                        if (totalDepth > 0) {
-                            s.vaf = static_cast<float>(altDepth) /
-                                    static_cast<float>(totalDepth);
-                            vafSet = true;
-                        }
-                    }
-                }
-            }
-            if (ad != nullptr) free(ad);
-        }
-
-        if (!vafSet) {
-            float* af = nullptr;
-            int naf = 0;
-            if (bcf_get_info_float(hdr, rec, "AF", &af, &naf) > 0 &&
-                naf > 0) {
-                s.vaf = af[0];
-                vafSet = true;
-            }
-            if (af != nullptr) free(af);
-        }
-
-        if (!vafSet) {
-            s.needs_read_vaf = true;
-            std::cerr << "Warning: No usable VAF/AF/AD at "
-                      << s.chrom << ":" << s.pos
-                      << ", will calculate VAF from somatic pileup reads\n";
-        }
+        s.needs_read_vaf = true;
         snvs.push_back(s);
     }
 

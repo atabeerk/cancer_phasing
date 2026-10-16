@@ -170,10 +170,11 @@ def process_chromosome(
                     pre_dir, f"{chrom}.input{bam_index}.bam"
                 )
             chrom_bams.append(chrom_bam)
-            # Exclude unmapped, secondary, supplementary reads; MAPQ < 20
+            # Exclude unmapped and secondary reads; retain supplementary reads.
+            # Also exclude alignments with MAPQ < 20.
             run_cmd([
                 "samtools", "view", "-b", "-@", str(tool_threads),
-                "-F", "2308", "-q", "20", bam_path, region,
+                "-F", "260", "-q", "20", bam_path, region,
                 "-o", chrom_bam,
             ], log_fh=chrom_log, env=cmd_env)
             run_cmd(
