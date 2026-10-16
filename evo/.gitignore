@@ -1,0 +1,7 @@
+# Keep local testing files out of the repository.
+/graph_ops/test_chromosome_graphs.py
+/graph_ops/test_fast_builder.py
+/graph_ops/compare_builders.py
+/graph_ops/test_simplify_graph.py
+/postprocess/test_annotate_source_vcf.py
+/postprocess/test_normalize_vaf_by_haplotype_cn.py
