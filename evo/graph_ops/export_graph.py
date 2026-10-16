@@ -117,6 +117,7 @@ def export_cytoscape_json(
             "chrom": "<chr>",   # chromosome label for this SNV/node
             "position": <pos>,
             "vaf": <float>,     # VAF for this SNV/node
+            "hvaf": <float|null>, # VAF on the assigned haplotype
             "haplotype": "<HP1|HP2|UNKNOWN|MIXED>"
           }
         }
@@ -147,6 +148,12 @@ def export_cytoscape_json(
         e for e in builder.edges
         if e.u in selected_nodes and e.v in selected_nodes
     ]
+    node_hvaf: Dict[int, Optional[float]] = {}
+    for edge in selected_edges:
+        for node, hvaf in ((edge.u, edge.hvaf_u), (edge.v, edge.hvaf_v)):
+            if node not in node_hvaf or node_hvaf[node] is None:
+                node_hvaf[node] = hvaf
+
     sorted_nodes = sorted(selected_nodes)
     node_x_sort = {pos: float(pos) for pos in sorted_nodes}
     node_y_sort = {
@@ -172,6 +179,7 @@ def export_cytoscape_json(
         vaf = builder.node_vaf.get(pos)
         if vaf is not None:
             data["vaf"] = vaf
+        data["hvaf"] = node_hvaf.get(pos)
         data["haplotype"] = builder.node_haplotype.get(pos, "UNKNOWN")
         data["hp_reads"] = builder.node_hp_reads.get(pos, "UNKNOWN")
         nodes_json.append({

@@ -340,6 +340,7 @@ struct HaplotypeSnvSummary {
     int hp1_alt_reads = 0;
     int hp2_ref_reads = 0;
     int hp2_alt_reads = 0;
+    int nohp_ref_reads = 0;
     int nohp_alt_reads = 0;
 };
 
@@ -358,10 +359,9 @@ static std::string hpAssignmentFromCounts(
 }
 
 static std::string haplotypeVaf(int ref_reads, int alt_reads) {
-    const int allele_depth = ref_reads + alt_reads;
-    if (allele_depth == 0) return "NA";
-    return std::to_string(static_cast<double>(alt_reads) /
-                          static_cast<double>(allele_depth));
+    float vaf = 0.0f;
+    if (!calculateHaplotypeVaf(ref_reads, alt_reads, vaf)) return "NA";
+    return std::to_string(vaf);
 }
 
 static void writeHaplotaggedSnvsTsv(
@@ -378,7 +378,10 @@ static void writeHaplotaggedSnvsTsv(
         return;
     }
 
-    out << "CHR\tPOSITION\tTOTAL_COVERAGE\tHP_COUNTS"
+    out << "CHR\tPOSITION\tTOTAL_COVERAGE"
+        << "\tHP1_SUPPORTING\tHP1_UNSUPPORTING"
+        << "\tHP2_SUPPORTING\tHP2_UNSUPPORTING"
+        << "\tUNKNOWN_SUPPORTING\tUNKNOWN_UNSUPPORTING"
         << "\tHP1_HVAF\tHP2_HVAF\tHP_ASSIGNMENT\n";
     for (const auto& s : snvs) {
         const std::string key = s.chrom + ":" + std::to_string(s.pos);
@@ -388,6 +391,7 @@ static void writeHaplotaggedSnvsTsv(
         int hp1 = 0;
         int hp2_ref = 0;
         int hp2 = 0;
+        int nohp_ref = 0;
         int nohp = 0;
         auto it = by_key.find(key);
         if (it != by_key.end()) {
@@ -396,12 +400,18 @@ static void writeHaplotaggedSnvsTsv(
             hp1 = it->second.hp1_alt_reads;
             hp2_ref = it->second.hp2_ref_reads;
             hp2 = it->second.hp2_alt_reads;
+            nohp_ref = it->second.nohp_ref_reads;
             nohp = it->second.nohp_alt_reads;
         }
         out << s.chrom << '\t'
             << s.pos << '\t'
             << total_coverage << '\t'
-            << hp1 << "/" << hp2 << "/" << nohp << '\t'
+            << hp1 << '\t'
+            << hp1_ref << '\t'
+            << hp2 << '\t'
+            << hp2_ref << '\t'
+            << nohp << '\t'
+            << nohp_ref << '\t'
             << haplotypeVaf(hp1_ref, hp1) << '\t'
             << haplotypeVaf(hp2_ref, hp2) << '\t'
             << hpAssignmentFromCounts(
@@ -1092,6 +1102,7 @@ int main(int argc, char* argv[]) {
             summary.hp1_alt_reads = snv.hp1_alt_reads;
             summary.hp2_ref_reads = snv.hp2_ref_reads;
             summary.hp2_alt_reads = snv.hp2_alt_reads;
+            summary.nohp_ref_reads = snv.nohp_ref_reads;
             summary.nohp_alt_reads = snv.nohp_alt_reads;
         }
         somaticHpSummarySeconds += elapsedSeconds(summaryT0);

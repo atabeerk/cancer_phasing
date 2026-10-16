@@ -74,7 +74,10 @@ def merge_haplotagged_snv_tsvs(outdir, chromosomes):
     if not wrote_header:
         with open(merged_path, "w", encoding="utf-8") as out:
             out.write(
-                "CHR\tPOSITION\tTOTAL_COVERAGE\tHP_COUNTS"
+                "CHR\tPOSITION\tTOTAL_COVERAGE"
+                "\tHP1_SUPPORTING\tHP1_UNSUPPORTING"
+                "\tHP2_SUPPORTING\tHP2_UNSUPPORTING"
+                "\tUNKNOWN_SUPPORTING\tUNKNOWN_UNSUPPORTING"
                 "\tHP1_HVAF\tHP2_HVAF\tHP_ASSIGNMENT\n"
             )
 

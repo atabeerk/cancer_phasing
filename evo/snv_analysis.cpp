@@ -531,6 +531,7 @@ static void hpSummaryForAltSupportingReads(
     int& hp1_alt_reads,
     int& hp2_ref_reads,
     int& hp2_alt_reads,
+    int& nohp_ref_reads,
     int& nohp_alt_reads,
     int& total_coverage_reads
 ) {
@@ -538,6 +539,7 @@ static void hpSummaryForAltSupportingReads(
     int hp1 = 0;
     int hp2_ref = 0;
     int hp2 = 0;
+    int nohp_ref = 0;
     int nohp = 0;
     total_coverage_reads = static_cast<int>(p.readBase.size());
     for (const auto& [read, base] : p.readBase) {
@@ -548,6 +550,7 @@ static void hpSummaryForAltSupportingReads(
         auto itHP = p.readHP.find(read);
         if (itHP == p.readHP.end()) {
             if (isAlt) nohp++;
+            else nohp_ref++;
             continue;
         }
         if (itHP->second == 1) {
@@ -556,8 +559,9 @@ static void hpSummaryForAltSupportingReads(
         } else if (itHP->second == 2) {
             if (isAlt) hp2++;
             else hp2_ref++;
-        } else if (isAlt) {
-            nohp++;
+        } else {
+            if (isAlt) nohp++;
+            else nohp_ref++;
         }
     }
 
@@ -565,6 +569,7 @@ static void hpSummaryForAltSupportingReads(
     hp1_alt_reads = hp1;
     hp2_ref_reads = hp2_ref;
     hp2_alt_reads = hp2;
+    nohp_ref_reads = nohp_ref;
     nohp_alt_reads = nohp;
     const int total = hp1 + hp2;
     if (total == 0) {
@@ -592,9 +597,23 @@ void annotateSNVHpSummary(SNV& snv, const PositionInfo& p) {
         snv.hp1_alt_reads,
         snv.hp2_ref_reads,
         snv.hp2_alt_reads,
+        snv.nohp_ref_reads,
         snv.nohp_alt_reads,
         snv.total_coverage_reads
     );
+}
+
+bool calculateHaplotypeVaf(
+    int refReads,
+    int altReads,
+    float& vaf
+) {
+    const int alleleDepth = refReads + altReads;
+    if (alleleDepth == 0) return false;
+
+    vaf = static_cast<float>(altReads) /
+          static_cast<float>(alleleDepth);
+    return true;
 }
 
 bool calculateVafFromReads(
@@ -624,6 +643,24 @@ bool calculateVafFromReads(
     vaf = static_cast<float>(altReads) /
           static_cast<float>(alleleDepth);
     return true;
+}
+
+static std::string assignedHaplotypeVaf(const SNV& snv) {
+    int refReads = 0;
+    int altReads = 0;
+    if (snv.hp_label == "HP1") {
+        refReads = snv.hp1_ref_reads;
+        altReads = snv.hp1_alt_reads;
+    } else if (snv.hp_label == "HP2") {
+        refReads = snv.hp2_ref_reads;
+        altReads = snv.hp2_alt_reads;
+    } else {
+        return "NA";
+    }
+
+    float vaf = 0.0f;
+    if (!calculateHaplotypeVaf(refReads, altReads, vaf)) return "NA";
+    return std::to_string(vaf);
 }
 
 void compareSNVs(const SNV& s1, const SNV& s2,
@@ -668,6 +705,8 @@ void compareSNVs(const SNV& s1, const SNV& s2,
 
     out << s1.chrom << "\t" << s1.pos << "\t" << s2.pos
         << "\tVAF1=" << s1.vaf << "\tVAF2=" << s2.vaf
+        << "\tHVAF1=" << assignedHaplotypeVaf(s1)
+        << "\tHVAF2=" << assignedHaplotypeVaf(s2)
         << "\tALT_ALT=" << altAlt
         << "\tALT_REF=" << altRef
         << "\tREF_ALT=" << refAlt

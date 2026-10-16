@@ -23,6 +23,8 @@ struct SNPEntry {
     
     float vaf1 = 0.5f;
     float vaf2 = 0.5f;
+    string hvaf1 = "NA";
+    string hvaf2 = "NA";
     string hap1 = "UNKNOWN";
     string hap2 = "UNKNOWN";
     string hp_reads1 = "0/0";
@@ -48,6 +50,10 @@ SNPEntry parseLine(const string& line) {
             e.vaf1 = stof(val_str);
         } else if (key == "VAF2") {
             e.vaf2 = stof(val_str);
+        } else if (key == "HVAF1") {
+            e.hvaf1 = val_str;
+        } else if (key == "HVAF2") {
+            e.hvaf2 = val_str;
         } else if (key == "HAP1") {
             e.hap1 = val_str;
         } else if (key == "HAP2") {
@@ -347,6 +353,8 @@ void processFile(
             e.chr + string(" ") + to_string(e.pos1) + " " + to_string(e.pos2) + " "
             "VAF1=" + to_string(e.vaf1) + " "
             "VAF2=" + to_string(e.vaf2) + " "
+            "HVAF1=" + e.hvaf1 + " "
+            "HVAF2=" + e.hvaf2 + " "
             "HAP1=" + e.hap1 + " "
             "HAP2=" + e.hap2 + " "
             "HP_READS1=" + e.hp_reads1 + " "

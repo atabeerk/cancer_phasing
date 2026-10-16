@@ -25,6 +25,8 @@ class Edge:
 
     vaf_u: float = 0.0    # VAF for u
     vaf_v: float = 0.0    # VAF for v
+    hvaf_u: Optional[float] = None  # Assigned-haplotype VAF for u
+    hvaf_v: Optional[float] = None  # Assigned-haplotype VAF for v
 
     best_score: float = 0.0   # BEST_SCORE from C++
     margin: float = 0.0       # MARGIN from C++

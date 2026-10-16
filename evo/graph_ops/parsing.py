@@ -88,6 +88,22 @@ def parse_hp_reads(kv: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
     return _normalize_hp_reads(hp1_raw), _normalize_hp_reads(hp2_raw)
 
 
+def _parse_optional_float(raw: Optional[str]) -> Optional[float]:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value or value.upper() in {"NA", "NAN", "NULL", "."}:
+        return None
+    return float(value)
+
+
+def parse_hvafs(kv: Dict[str, str]) -> Tuple[Optional[float], Optional[float]]:
+    return (
+        _parse_optional_float(kv.get("HVAF1")),
+        _parse_optional_float(kv.get("HVAF2")),
+    )
+
+
 def parse_snv_line(line: str) -> Tuple[str, int, int, Dict[str, str]]:
     """
     Parse a line like:
@@ -164,6 +180,7 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                 # VAFs
                 vaf1 = float(kv.get("VAF1", "0.0"))
                 vaf2 = float(kv.get("VAF2", "0.0"))
+                hvaf1, hvaf2 = parse_hvafs(kv)
 
                 # Reliability and scoring info from C++
                 reliability = float(kv.get("RELIABILITY", "0.0"))
@@ -177,11 +194,13 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                     if orientation == "1_before_2":
                         u, v = pos1, pos2
                         vaf_u, vaf_v = vaf1, vaf2
+                        hvaf_u, hvaf_v = hvaf1, hvaf2
                         hap_u, hap_v = hap1, hap2
                         hp_reads_u, hp_reads_v = hp_reads1, hp_reads2
                     elif orientation == "2_before_1":
                         u, v = pos2, pos1
                         vaf_u, vaf_v = vaf2, vaf1
+                        hvaf_u, hvaf_v = hvaf2, hvaf1
                         alt_ref, ref_alt = ref_alt, alt_ref
                         hap_u, hap_v = hap2, hap1
                         hp_reads_u, hp_reads_v = hp_reads2, hp_reads1
@@ -191,6 +210,7 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                     # Undirected relations: just keep the file order
                     u, v = pos1, pos2
                     vaf_u, vaf_v = vaf1, vaf2
+                    hvaf_u, hvaf_v = hvaf1, hvaf2
                     hap_u, hap_v = hap1, hap2
                     hp_reads_u, hp_reads_v = hp_reads1, hp_reads2
 
@@ -207,6 +227,8 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                         ref_ref=ref_ref,
                         vaf_u=vaf_u,
                         vaf_v=vaf_v,
+                        hvaf_u=hvaf_u,
+                        hvaf_v=hvaf_v,
                         best_score=best_score,
                         margin=margin,
                         source_file=path,

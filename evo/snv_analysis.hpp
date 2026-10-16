@@ -21,6 +21,7 @@ struct SNV {
     int hp1_alt_reads = 0;
     int hp2_ref_reads = 0;
     int hp2_alt_reads = 0;
+    int nohp_ref_reads = 0;
     int nohp_alt_reads = 0;
     int total_coverage_reads = 0;
 };
@@ -88,6 +89,14 @@ std::size_t accumulateGermlineVotes(
 
 // Populate per-SNV HP label/proportion/read counts from pileup info.
 void annotateSNVHpSummary(SNV& snv, const PositionInfo& p);
+
+// Calculate ALT / (REF + ALT) for one haplotype.
+// Returns false when that haplotype has no REF or ALT reads.
+bool calculateHaplotypeVaf(
+    int refReads,
+    int altReads,
+    float& vaf
+);
 
 // Calculate ALT / (REF + ALT) from unique pileup reads.
 // Returns false when no reads support either allele.
