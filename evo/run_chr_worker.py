@@ -5,6 +5,8 @@ import re
 import subprocess
 import time
 
+import pysam
+
 from run_chr_log_stats import (
     RELATIONS,
     component_span_stats_from_stats,
@@ -43,6 +45,24 @@ def run_cmd(cmd, log_fh=None, env=None):
         print(f"[Failed] {cmd[0]} exited with code {process.returncode}. See logs for details.")
         raise RuntimeError(f"Command failed ({process.returncode}): {' '.join(cmd)}")
     print(f"[Done] {cmd[0]} ({line_count} log lines)")
+
+
+def assign_unique_alignment_names(bam_path, prefix):
+    """Give every BAM alignment record a unique temporary QNAME."""
+    output_path = f"{bam_path}.alignment_records.bam"
+    count = 0
+    try:
+        with pysam.AlignmentFile(bam_path, "rb") as source:
+            with pysam.AlignmentFile(output_path, "wb", template=source) as output:
+                for alignment in source.fetch(until_eof=True):
+                    count += 1
+                    alignment.query_name = f"{prefix}_aln{count}"
+                    output.write(alignment)
+        os.replace(output_path, bam_path)
+    finally:
+        if os.path.exists(output_path):
+            os.unlink(output_path)
+    return count
 
 
 def get_chromosomes_from_bam(bam_path):
@@ -177,6 +197,12 @@ def process_chromosome(
                 "-F", "260", "-q", "20", bam_path, region,
                 "-o", chrom_bam,
             ], log_fh=chrom_log, env=cmd_env)
+            alignment_count = assign_unique_alignment_names(
+                chrom_bam, f"input{bam_index}"
+            )
+            chrom_log.write(
+                f"alignment_records_input{bam_index}={alignment_count}\n"
+            )
             run_cmd(
                 ["samtools", "index", "-@", str(tool_threads), chrom_bam],
                 log_fh=chrom_log,
