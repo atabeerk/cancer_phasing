@@ -589,7 +589,8 @@ class FastGraphBuilder:
                 return False
             if not self._check_timing_not_imply_divergent_conflict(u, v, edge):
                 return False
-            if self._exists_directed_path(v, u):
+            # Timing paths may pass through different cooccurring members.
+            if self._cluster_reachable_by_rep(rv, ru):
                 self._log_conflict(edge, None, "timing_cycle")
                 return False
         elif edge.relation == "divergent":

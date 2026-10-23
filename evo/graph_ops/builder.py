@@ -671,8 +671,9 @@ class GraphBuilder:
             if not self._check_timing_not_imply_divergent_conflict(u, v, edge):
                 return False
 
-            # Enforce DAG: adding u -> v must not create a cycle
-            if self._exists_directed_path(v, u):
+            # Enforce the DAG after collapsing cooccurring mutations.
+            fwd, _ = self._build_cluster_timing_graph()
+            if self._cluster_reachable(self._find(v), self._find(u), fwd):
                 self._log_conflict(edge, None, "timing_cycle")
                 return False
 
