@@ -173,10 +173,8 @@ def process_chromosome(
         chrom_log.write(
             f"divergent_same_hp={int(divergent_same_hp)}\n"
         )
-        if exclude_regions_bed:
-            chrom_log.write(
-                f"exclude_regions_bed={exclude_regions_bed}\n"
-            )
+        for bed_file in exclude_regions_bed or []:
+            chrom_log.write(f"exclude_regions_bed={bed_file}\n")
         chrom_log.flush()
 
         # --- Step 1: Split BAM for this chromosome with filters ---
@@ -303,11 +301,8 @@ def process_chromosome(
                 "--germline-vcf-sample-name",
                 germline_vcf_sample_name,
             ])
-        if exclude_regions_bed:
-            main_cmd.extend([
-                "--exclude-regions-bed",
-                exclude_regions_bed,
-            ])
+        for bed_file in exclude_regions_bed or []:
+            main_cmd.extend(["--exclude-regions-bed", bed_file])
         if divergent_same_hp:
             main_cmd.append("--divergent-same-hp")
 

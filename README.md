@@ -71,7 +71,7 @@ Repeat `--bam` for each tumor BAM. The files remain separate and are supplied to
 
 Use `--divergent-same-hp` to retain divergent relationships only when both mutations are assigned HP1 or both are assigned HP2. The default behavior remains unchanged.
 
-Use `--exclude-regions-bed /path/to/regions.bed` to remove somatic mutations overlapping standard 0-based, half-open BED intervals before pileup and relationship analysis. Germline variants used for read haplotagging are not filtered.
+Use `--exclude-regions-bed /path/to/regions.bed` to remove somatic mutations overlapping standard 0-based, half-open BED intervals before pileup and relationship analysis. Germline variants used for read haplotagging are not filtered. Repeat the option to exclude the union of multiple BED files, for example `--exclude-regions-bed /path/to/segdups.bed --exclude-regions-bed /path/to/other_regions.bed`. Overlapping or repeated intervals exclude each mutation only once.
 
 * ### Alternatively, run `evo/main` directly (not recommended)
 

@@ -113,7 +113,7 @@ def main():
     if germline_vcf_path:
         required_files.append(germline_vcf_path)
     if exclude_regions_bed:
-        required_files.append(exclude_regions_bed)
+        required_files.extend(exclude_regions_bed)
     for f in required_files:
         if not os.path.exists(f):
             sys.exit(f"Error: required file not found: {f}")

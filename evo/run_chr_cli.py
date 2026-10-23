@@ -68,10 +68,11 @@ def parse_args():
     )
     parser.add_argument(
         "--exclude-regions-bed",
-        default=None,
+        action="append",
+        default=[],
         help=(
-            "Optional BED file whose intervals are excluded from the somatic "
-            "mutation set."
+            "BED file whose intervals are excluded from the somatic mutation set. "
+            "Repeat this option to exclude the union of multiple BED files."
         ),
     )
     parser.add_argument(

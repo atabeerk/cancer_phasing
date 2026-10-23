@@ -36,38 +36,40 @@ using BedIntervalsByChrom =
     std::unordered_map<std::string, std::vector<BedInterval>>;
 
 
-bool readExclusionBed(
-    const std::string& bedFile,
+bool readExclusionBeds(
+    const std::vector<std::string>& bedFiles,
     BedIntervalsByChrom& intervalsByChrom,
     std::size_t& intervalCount
 ) {
     intervalsByChrom.clear();
     intervalCount = 0;
 
-    std::ifstream in(bedFile);
-    if (!in.is_open()) {
-        std::cerr << "Error opening exclusion BED file: " << bedFile << "\n";
-        return false;
-    }
-
-    std::string line;
-    std::size_t lineNumber = 0;
-    while (std::getline(in, line)) {
-        lineNumber++;
-        const std::size_t first = line.find_first_not_of(" \t\r\n");
-        if (first == std::string::npos || line[first] == '#') continue;
-
-        std::string chrom;
-        std::int64_t start = 0;
-        std::int64_t end = 0;
-        std::istringstream fields(line);
-        if (!(fields >> chrom >> start >> end) || start < 0 || end <= start) {
-            std::cerr << "Error: invalid BED interval at " << bedFile
-                      << ":" << lineNumber << "\n";
+    for (const auto& bedFile : bedFiles) {
+        std::ifstream in(bedFile);
+        if (!in.is_open()) {
+            std::cerr << "Error opening exclusion BED file: " << bedFile << "\n";
             return false;
         }
-        intervalsByChrom[chrom].push_back({start, end});
-        intervalCount++;
+
+        std::string line;
+        std::size_t lineNumber = 0;
+        while (std::getline(in, line)) {
+            lineNumber++;
+            const std::size_t first = line.find_first_not_of(" \t\r\n");
+            if (first == std::string::npos || line[first] == '#') continue;
+
+            std::string chrom;
+            std::int64_t start = 0;
+            std::int64_t end = 0;
+            std::istringstream fields(line);
+            if (!(fields >> chrom >> start >> end) || start < 0 || end <= start) {
+                std::cerr << "Error: invalid BED interval at " << bedFile
+                          << ":" << lineNumber << "\n";
+                return false;
+            }
+            intervalsByChrom[chrom].push_back({start, end});
+            intervalCount++;
+        }
     }
 
     for (auto& [chrom, intervals] : intervalsByChrom) {
@@ -459,7 +461,7 @@ int main(int argc, char* argv[]) {
                   << " [--min-reads <N>] [--somatic-sample-name <SAMPLE_NAME>]"
                   << " [--germline-vcf <VCF_FILE>]"
                   << " [--germline-vcf-sample-name <SAMPLE_NAME>]"
-                  << " [--exclude-regions-bed <BED_FILE>]"
+                  << " [--exclude-regions-bed <BED_FILE>]..."
                   << " [--max-pair-distance-kb <N>]"
                   << " [--divergent-same-hp]"
                   << " [--bam-haplotagged <0|1>]\n";
@@ -470,7 +472,7 @@ int main(int argc, char* argv[]) {
     std::string outDir;
     std::string germlineVcfFile;
     std::string germlineVcfSampleName;
-    std::string excludeRegionsBedFile;
+    std::vector<std::string> excludeRegionsBedFiles;
     int minReads = 2;
     std::string vcfSampleName;
     int maxPairDistanceKbArg = -1;
@@ -497,7 +499,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--germline-vcf-sample-name" && i + 1 < argc) {
             germlineVcfSampleName = argv[++i];
         } else if (arg == "--exclude-regions-bed" && i + 1 < argc) {
-            excludeRegionsBedFile = argv[++i];
+            excludeRegionsBedFiles.push_back(argv[++i]);
         } else if (arg == "--max-pair-distance-kb" && i + 1 < argc) {
             maxPairDistanceKbArg = std::stoi(argv[++i]);
             if (maxPairDistanceKbArg <= 0) {
@@ -564,11 +566,12 @@ int main(int argc, char* argv[]) {
                   << germlineVcfFile << "\n";
         return 1;
     }
-    if (!excludeRegionsBedFile.empty() &&
-        !fs::exists(excludeRegionsBedFile)) {
-        std::cerr << "Error: exclusion BED file not found: "
-                  << excludeRegionsBedFile << "\n";
-        return 1;
+    for (const auto& bedFile : excludeRegionsBedFiles) {
+        if (!fs::exists(bedFile)) {
+            std::cerr << "Error: exclusion BED file not found: "
+                      << bedFile << "\n";
+            return 1;
+        }
     }
 
     const bool useGermlineVcf = !germlineVcfFile.empty();
@@ -607,11 +610,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (!excludeRegionsBedFile.empty()) {
+    if (!excludeRegionsBedFiles.empty()) {
         BedIntervalsByChrom intervalsByChrom;
         std::size_t bedIntervalCount = 0;
-        if (!readExclusionBed(
-                excludeRegionsBedFile,
+        if (!readExclusionBeds(
+                excludeRegionsBedFiles,
                 intervalsByChrom,
                 bedIntervalCount)) {
             return 1;
@@ -628,8 +631,12 @@ int main(int argc, char* argv[]) {
             snvs.end()
         );
         const std::size_t excludedSomaticSnvs = inputSomaticSnvs - snvs.size();
-        std::cout << "[somatic_region_filter] bed="
-                  << excludeRegionsBedFile
+        std::cout << "[somatic_region_filter] bed=";
+        for (std::size_t i = 0; i < excludeRegionsBedFiles.size(); ++i) {
+            if (i > 0) std::cout << ",";
+            std::cout << excludeRegionsBedFiles[i];
+        }
+        std::cout << " bed_files=" << excludeRegionsBedFiles.size()
                   << " bed_intervals=" << bedIntervalCount
                   << " input_snvs=" << inputSomaticSnvs
                   << " excluded_snvs=" << excludedSomaticSnvs

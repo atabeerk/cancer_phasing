@@ -56,8 +56,8 @@ def write_run_header(
         run_log.write(
             f"Germline VCF sample name: {germline_vcf_sample_name}\n"
         )
-    if exclude_regions_bed:
-        run_log.write(f"Excluded-regions BED: {exclude_regions_bed}\n")
+    for bed_file in exclude_regions_bed or []:
+        run_log.write(f"Excluded-regions BED: {bed_file}\n")
     run_log.write("\n=== Default/auto-selected parameters ===\n")
     run_log.write("main_default_min_reads=2\n")
     run_log.write("max_pair_distance_source=computed_by_main_per_chrom_bam\n")
