@@ -1,0 +1,11 @@
+CHR	POSITION1	POSITION2	RELATION	ALT_ALT	ALT_REF	REF_ALT	REF_REF	TOTAL	VAF1	VAF2
+chr1	100	120	cooccurring	25	0	0	25	50	0.5	0.5
+chr1	100	140	timing	15	10	0	25	50	0.5	0.3
+chr1	100	160	timing	10	15	0	25	50	0.5	0.2
+chr1	100	180	timing	5	20	0	25	50	0.5	0.1
+chr1	120	140	timing	15	10	0	25	50	0.5	0.3
+chr1	120	160	timing	10	15	0	25	50	0.5	0.2
+chr1	120	180	timing	5	20	0	25	50	0.5	0.1
+chr1	140	160	timing	10	5	0	35	50	0.3	0.2
+chr1	140	180	divergent	0	15	5	30	50	0.3	0.1
+chr1	160	180	divergent	0	10	5	35	50	0.2	0.1

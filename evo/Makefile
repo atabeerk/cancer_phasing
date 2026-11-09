@@ -15,11 +15,12 @@ ifneq ($(UNAME_S),Darwin)
 LDLIBS += -lstdc++fs
 endif
 
-.PHONY: help build run test-smoke clean
+.PHONY: help build run test test-smoke clean
 
 help:
 	@echo "make build       # compile evo/main"
 	@echo "make run         # alias for build"
+	@echo "make test        # run the bundled BAM/VCF example and check its output"
 	@echo "make test-smoke  # lightweight runtime checks"
 	@echo "make clean       # remove build artifact"
 
@@ -29,6 +30,9 @@ $(BIN): $(SRC) $(HEADERS)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) $(SRC) $(LDLIBS) -o $(BIN)
 
 run: build
+
+test: build
+	$(PYTHON) ../tests/run_toy_test.py
 
 test-smoke: build
 	@./$(BIN) --help >/dev/null

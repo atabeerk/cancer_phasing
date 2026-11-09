@@ -53,6 +53,23 @@ make build
 Keep the environment active when building and running the program.
 The remaining commands below are run from `evo/`.
 
+### Small end-to-end test
+
+From `evo/`, with the environment active, run:
+
+```bash
+make test
+```
+
+This runs the bundled BAM, somatic VCF and phased germline VCF in `toy_data/`
+through the full pipeline and compares results with `expected_output.tsv` in
+that same folder. The example has five nearby mutations, 50 reads covering all
+five, and cooccurring, ordered and divergent relationships. The command also
+checks read counts, VAFs and germline haplotagging, and prints the output directory.
+See `toy_data/README.md` for the input design and expected relationships.
+
+From `evo/`, use `make help`, `make build`, `make test`, `make test-smoke` or `make clean`.
+
 ## Quickstart
 
 ```bash
@@ -128,6 +145,3 @@ from the BAM header.
 | `<output_directory_name>.tar.gz` | Final graphs, inference results, summaries, logs and optional haplotagged/CN tables for the selected chromosomes, prepared for export.  |
 
 Phase graphs produced in JSON format can be visualized with [Cytoscape](https://cytoscape.org).
-
-
-From `evo/`, use `make help`, `make build`, `make test-smoke` or `make clean`.
