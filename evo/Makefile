@@ -9,7 +9,8 @@ BIN = main
 
 CXXFLAGS ?= -std=c++17 -g
 CPPFLAGS ?= -D__STDC_LIMIT_MACROS -I$(HTSLIB_PREFIX)/include
-LDFLAGS ?= -L$(HTSLIB_PREFIX)/lib
+# Find HTSlib both when linking and when launching the executable.
+LDFLAGS ?= -L$(HTSLIB_PREFIX)/lib -Wl,-rpath,$(HTSLIB_PREFIX)/lib
 LDLIBS ?= -lhts -lz -lpthread
 ifneq ($(UNAME_S),Darwin)
 LDLIBS += -lstdc++fs
@@ -26,7 +27,7 @@ help:
 
 build: $(BIN)
 
-$(BIN): $(SRC) $(HEADERS)
+$(BIN): $(SRC) $(HEADERS) Makefile
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) $(SRC) $(LDLIBS) -o $(BIN)
 
 run: build
