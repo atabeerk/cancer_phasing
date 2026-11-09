@@ -36,3 +36,11 @@ class Edge:
     hap_v: Optional[str] = None
     hp_reads_u: Optional[str] = None
     hp_reads_v: Optional[str] = None
+
+
+@dataclass
+class RejectedEdge:
+    """An edge excluded from inference, retained for reporting and display."""
+
+    edge: Edge
+    reason: str

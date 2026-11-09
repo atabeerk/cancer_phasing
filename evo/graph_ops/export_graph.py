@@ -1,11 +1,11 @@
 # graph_ops/export_graph.py
 
 import json
-import csv
 from collections import Counter
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
-from builder import GraphBuilder
+from fast_builder import FastGraphBuilder
+from models import Edge, RejectedEdge
 
 
 def _median(values: List[float]) -> Optional[float]:
@@ -102,10 +102,10 @@ def _component_layout_positions(
 
 
 def export_cytoscape_json(
-    builder: GraphBuilder,
+    builder: FastGraphBuilder,
     out_path: str,
     name: Optional[str] = None,
-    node_subset: Optional[Set[int]] = None,
+    rejected_edges: Optional[List[RejectedEdge]] = None,
 ) -> None:
     """
     Export the graph to a Cytoscape-compatible JSON file.
@@ -128,7 +128,9 @@ def export_cytoscape_json(
             "id": "<u>-<v>-<index>",
             "source": "<u>",
             "target": "<v>",
-            "relation": "timing" | "cooccurring" | "divergent",
+            "relation": "timing" | "cooccurring" | "divergent" | "unknown",
+            "rejected_relation": "<attempted relation>",  # rejected edges only
+            "rejection_reason": "<reason>",               # rejected edges only
             "reliability": <float>,
             "directed": <bool>,         # True only for timing
             "read_counts": "x/y/z/t",   # ALT_ALT/ALT_REF/REF_ALT/REF_REF
@@ -139,27 +141,52 @@ def export_cytoscape_json(
     if name is None:
         name = "chunk_graph"
 
-    selected_nodes = (
-        set(builder.nodes)
-        if node_subset is None
-        else set(builder.nodes) & set(node_subset)
-    )
-    selected_edges = [
-        e for e in builder.edges
-        if e.u in selected_nodes and e.v in selected_nodes
-    ]
+    selected_rejected = list(rejected_edges or [])
+    selected_nodes = set(builder.nodes)
+    for rejected in selected_rejected:
+        selected_nodes.add(rejected.edge.u)
+        selected_nodes.add(rejected.edge.v)
+
+    selected_edges = builder.edges
+
     node_hvaf: Dict[int, Optional[float]] = {}
-    for edge in selected_edges:
+    hvaf_edges = selected_edges + [rejected.edge for rejected in selected_rejected]
+    for edge in hvaf_edges:
         for node, hvaf in ((edge.u, edge.hvaf_u), (edge.v, edge.hvaf_v)):
             if node not in node_hvaf or node_hvaf[node] is None:
                 node_hvaf[node] = hvaf
 
+    fallback_chrom: Dict[int, str] = {}
+    fallback_vaf: Dict[int, float] = {}
+    fallback_haplotype: Dict[int, str] = {}
+    fallback_hp_reads: Dict[int, str] = {}
+    for rejected in selected_rejected:
+        e = rejected.edge
+        fallback_chrom.setdefault(e.u, e.chrom)
+        fallback_chrom.setdefault(e.v, e.chrom)
+        fallback_vaf.setdefault(e.u, e.vaf_u)
+        fallback_vaf.setdefault(e.v, e.vaf_v)
+        if e.hap_u is not None:
+            fallback_haplotype.setdefault(e.u, e.hap_u)
+        if e.hap_v is not None:
+            fallback_haplotype.setdefault(e.v, e.hap_v)
+        if e.hp_reads_u is not None:
+            fallback_hp_reads.setdefault(e.u, e.hp_reads_u)
+        if e.hp_reads_v is not None:
+            fallback_hp_reads.setdefault(e.v, e.hp_reads_v)
+
+    node_chrom = dict(fallback_chrom)
+    node_chrom.update(builder.node_chrom)
+    node_vaf = dict(fallback_vaf)
+    node_vaf.update(builder.node_vaf)
+    node_haplotype = dict(fallback_haplotype)
+    node_haplotype.update(builder.node_haplotype)
+    node_hp_reads = dict(fallback_hp_reads)
+    node_hp_reads.update(builder.node_hp_reads)
+
     sorted_nodes = sorted(selected_nodes)
     node_x_sort = {pos: float(pos) for pos in sorted_nodes}
-    node_y_sort = {
-        pos: float(builder.node_vaf[pos]) if builder.node_vaf.get(pos) is not None else 0.0
-        for pos in sorted_nodes
-    }
+    node_y_sort = {pos: float(node_vaf.get(pos, 0.0)) for pos in sorted_nodes}
     uncondensed_positions = _component_layout_positions(
         node_ids=sorted_nodes,
         edges=((e.u, e.v) for e in selected_edges),
@@ -173,15 +200,15 @@ def export_cytoscape_json(
         # Keep position as string for visualization tools (e.g., Cytoscape)
         # to avoid scientific-notation formatting of large genomic coordinates.
         data = {"id": str(pos), "position": str(pos)}
-        chrom = builder.node_chrom.get(pos)
+        chrom = node_chrom.get(pos)
         if chrom is not None:
             data["chrom"] = chrom
-        vaf = builder.node_vaf.get(pos)
+        vaf = node_vaf.get(pos)
         if vaf is not None:
             data["vaf"] = vaf
         data["hvaf"] = node_hvaf.get(pos)
-        data["haplotype"] = builder.node_haplotype.get(pos, "UNKNOWN")
-        data["hp_reads"] = builder.node_hp_reads.get(pos, "UNKNOWN")
+        data["haplotype"] = node_haplotype.get(pos, "UNKNOWN")
+        data["hp_reads"] = node_hp_reads.get(pos, "UNKNOWN")
         nodes_json.append({
             "data": data,
             "position": uncondensed_positions[pos],
@@ -211,6 +238,24 @@ def export_cytoscape_json(
             }
         })
 
+    for idx, rejected in enumerate(selected_rejected):
+        e = rejected.edge
+        read_counts_str = f"{e.alt_alt}/{e.alt_ref}/{e.ref_alt}/{e.ref_ref}"
+        edges_json.append({
+            "data": {
+                "id": f"unknown-{e.u}-{e.v}-{idx}",
+                "source": str(e.u),
+                "target": str(e.v),
+                "relation": "unknown",
+                "rejected_relation": e.relation,
+                "rejection_reason": rejected.reason,
+                "reliability": e.reliability,
+                "directed": False,
+                "read_counts": read_counts_str,
+                "label": f"{read_counts_str} | rel={e.reliability:.3f}",
+            }
+        })
+
     graph = {
         "data": {"name": name},
         "elements": {"nodes": nodes_json, "edges": edges_json},
@@ -221,10 +266,9 @@ def export_cytoscape_json(
 
 
 def export_condensed_cytoscape_json(
-    builder: GraphBuilder,
+    builder: FastGraphBuilder,
     out_path: str,
     name: Optional[str] = None,
-    node_subset: Optional[Set[int]] = None,
 ) -> None:
     """
     Export a condensed graph where:
@@ -275,19 +319,12 @@ def export_condensed_cytoscape_json(
     if name is None:
         name = "chunk_graph_condensed"
 
-    selected_nodes = (
-        set(builder.nodes)
-        if node_subset is None
-        else set(builder.nodes) & set(node_subset)
-    )
-    selected_edges = [
-        e for e in builder.edges
-        if e.u in selected_nodes and e.v in selected_nodes
-    ]
+    selected_nodes = set(builder.nodes)
+    selected_edges = builder.edges
 
     # ---- Build cluster mapping ----
     # builder.cluster_nodes: rep -> set(nodes)  (union–find components)
-    # builder.nodes: SNVs that actually appear in accepted edges. :contentReference[oaicite:4]{index=4} :contentReference[oaicite:5]{index=5}
+    # builder.nodes: SNVs that actually appear in accepted edges.
     clusters_used = {}
     for rep, members in builder.cluster_nodes.items():
         used = members & selected_nodes
@@ -358,7 +395,7 @@ def export_condensed_cytoscape_json(
     # For divergent edges, treat as undirected (canonical ordering).
     agg_edges = {}
 
-    for e in selected_edges:  # accepted edges only :contentReference[oaicite:6]{index=6}
+    for e in selected_edges:  # accepted edges only
         if e.relation == "cooccurring":
             continue  # internal to clusters in the condensed view
 
@@ -370,7 +407,7 @@ def export_condensed_cytoscape_json(
             continue
         if cu == cv:
             # Defensive: timing/divergent edges inside a cluster should already
-            # be forbidden by GraphBuilder invariants. :contentReference[oaicite:7]{index=7}
+            # be forbidden by graph consistency invariants.
             continue
 
         if e.relation == "timing":
@@ -475,75 +512,44 @@ def export_condensed_cytoscape_json(
         json.dump(graph, f, indent=2)
 
 
-def _in_region(u: int, v: int, region_start: Optional[int], region_end: Optional[int]) -> bool:
-    if region_start is None and region_end is None:
-        return True
-    if region_start is None or region_end is None:
-        raise ValueError("region_start and region_end must be provided together")
-    return region_start <= int(u) <= region_end and region_start <= int(v) <= region_end
+def _format_edge_line(e: Edge) -> str:
+    total = e.alt_alt + e.alt_ref + e.ref_alt + e.ref_ref
+    hp_reads_u = e.hp_reads_u if e.hp_reads_u is not None else "UNKNOWN"
+    hp_reads_v = e.hp_reads_v if e.hp_reads_v is not None else "UNKNOWN"
+    return (
+        f"{e.chrom} {e.u} {e.v} "
+        f"RELATION={e.relation} "
+        f"VAF1={e.vaf_u} "
+        f"VAF2={e.vaf_v} "
+        f"ALT_ALT={e.alt_alt} "
+        f"ALT_REF={e.alt_ref} "
+        f"REF_ALT={e.ref_alt} "
+        f"REF_REF={e.ref_ref} "
+        f"TOTAL={total} "
+        f"HP_READS1={hp_reads_u} "
+        f"HP_READS2={hp_reads_v} "
+        f"RELIABILITY={e.reliability} "
+        f"BEST_SCORE={e.best_score} "
+        f"MARGIN={e.margin}"
+    )
 
 
-def write_inconsistency_log(
-    builder: GraphBuilder,
+def write_rejected_edges(
+    rejected_edges: Iterable[RejectedEdge],
     out_path: str,
-    region_start: Optional[int] = None,
-    region_end: Optional[int] = None,
-) -> int:
-    """Write rejected edges, optionally restricted to one inclusive region."""
-    fieldnames = [
-        "u",
-        "v",
-        "relation",
-        "reliability",
-        "read_counts",
-        "reason",
-        "conflict_u",
-        "conflict_v",
-        "conflict_relation_label",
-        "conflict_reliability",
-    ]
-
-    written = 0
-    with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
-        writer.writeheader()
-        for rec in builder.inconsistencies:
-            if not _in_region(rec["u"], rec["v"], region_start, region_end):
-                continue
-            writer.writerow(rec)
-            written += 1
-    return written
+) -> None:
+    """Write graph consistency rejections for the chromosome."""
+    with open(out_path, "w") as f:
+        for rejected in rejected_edges:
+            e = rejected.edge
+            f.write(f"{_format_edge_line(e)} REASON={rejected.reason}\n")
 
 
 def write_accepted_edges(
-    builder: GraphBuilder,
+    builder: FastGraphBuilder,
     out_path: str,
-    region_start: Optional[int] = None,
-    region_end: Optional[int] = None,
-) -> int:
-    """Write accepted edges, optionally restricted to one inclusive region."""
-    written = 0
+) -> None:
+    """Write all accepted edges for the chromosome."""
     with open(out_path, "w") as f:
         for e in builder.edges:
-            if not _in_region(e.u, e.v, region_start, region_end):
-                continue
-            total = e.alt_alt + e.alt_ref + e.ref_alt + e.ref_ref
-            line = (
-                f"{e.chrom} {e.u} {e.v} "
-                f"RELATION={e.relation} "
-                f"VAF1={e.vaf_u} "
-                f"VAF2={e.vaf_v} "
-                f"ALT_ALT={e.alt_alt} "
-                f"ALT_REF={e.alt_ref} "
-                f"REF_ALT={e.ref_alt} "
-                f"REF_REF={e.ref_ref} "
-                f"TOTAL={total} "
-                f"HP_READS1={(e.hp_reads_u if e.hp_reads_u is not None else 'UNKNOWN')} "
-                f"HP_READS2={(e.hp_reads_v if e.hp_reads_v is not None else 'UNKNOWN')} "
-                f"RELIABILITY={e.reliability} "
-                f"BEST_SCORE={e.best_score} "
-                f"MARGIN={e.margin}"
-            )
-            f.write(line + "\n")
-            written += 1
-    return written
+            f.write(_format_edge_line(e) + "\n")

@@ -6,7 +6,7 @@ from typing import Dict, List, Any, Set, Optional
 import csv
 import math
 
-from builder import GraphBuilder
+from fast_builder import FastGraphBuilder
 
 
 def _edge_support(e) -> int:
@@ -15,7 +15,7 @@ def _edge_support(e) -> int:
 
 
 def compute_component_statistics_rows(
-    builder: GraphBuilder,
+    builder: FastGraphBuilder,
     chunk_base: str,
     chromosome: Optional[str] = None,
 ) -> List[Dict[str, Any]]:

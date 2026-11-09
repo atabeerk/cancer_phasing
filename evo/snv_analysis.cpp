@@ -1,63 +1,14 @@
 #include "snv_analysis.hpp"
 #include <iostream>
 #include <fstream>
-#include <sstream>
+#include <stdexcept>
 #include <cctype>
-#include <algorithm>
-#include <cstring>
 #include <htslib/vcf.h>
 #include <htslib/hts.h>
 
 // ---- Parse VCF (.vcf or .vcf.gz) using htslib ----
-static bool resolveSample(
-    bcf_hdr_t* hdr,
-    const std::string& requestedSampleName,
-    bool requireExplicit,
-    const std::string& label,
-    int& selectedSampleIdx,
-    std::string& resolvedSampleName
-) {
-    const int numSamples = bcf_hdr_nsamples(hdr);
-    selectedSampleIdx = -1;
-    resolvedSampleName.clear();
-
-    if (requireExplicit && requestedSampleName.empty()) {
-        std::cerr << "Error: " << label << " sample name is required.\n";
-        return false;
-    }
-
-    if (!requestedSampleName.empty()) {
-        selectedSampleIdx =
-            bcf_hdr_id2int(hdr, BCF_DT_SAMPLE, requestedSampleName.c_str());
-        if (selectedSampleIdx < 0) {
-            std::cerr << "Error: " << label << " sample '"
-                      << requestedSampleName << "' was not found in the VCF.\n";
-            return false;
-        }
-    } else if (numSamples == 1) {
-        selectedSampleIdx = 0;
-    } else if (numSamples > 1) {
-        std::cerr << "Error: " << label << " VCF contains " << numSamples
-                  << " samples; an explicit sample name is required.\n";
-        return false;
-    }
-
-    if (selectedSampleIdx >= 0) {
-        resolvedSampleName = hdr->samples[selectedSampleIdx];
-        std::cout << "Using " << label << " VCF sample '"
-                  << resolvedSampleName << "'.\n";
-    }
-    return true;
-}
-
-bool readVCF(
-    const std::string& vcfFile,
-    const std::string& requestedSampleName,
-    std::vector<SNV>& snvs,
-    std::string& resolvedSampleName
-) {
+bool readVCF(const std::string& vcfFile, std::vector<SNV>& snvs) {
     snvs.clear();
-    resolvedSampleName.clear();
 
     htsFile* fp = bcf_open(vcfFile.c_str(), "r");
     if (!fp) {
@@ -72,19 +23,6 @@ bool readVCF(
         return false;
     }
 
-    int selectedSampleIdx = -1;
-    if (!resolveSample(
-            hdr,
-            requestedSampleName,
-            false,
-            "somatic",
-            selectedSampleIdx,
-            resolvedSampleName)) {
-        bcf_hdr_destroy(hdr);
-        bcf_close(fp);
-        return false;
-    }
-
     bcf1_t* rec = bcf_init();
     if (!rec) {
         std::cerr << "Error allocating VCF record\n";
@@ -93,7 +31,8 @@ bool readVCF(
         return false;
     }
 
-    while (bcf_read(fp, hdr, rec) == 0) {
+    int status = 0;
+    while ((status = bcf_read(fp, hdr, rec)) == 0) {
         bcf_unpack(rec, BCF_UN_ALL);
         if (rec->n_allele < 2 || rec->d.allele[0][0] == '\0' ||
             rec->d.allele[1][0] == '\0') {
@@ -105,147 +44,66 @@ bool readVCF(
         s.pos = rec->pos + 1;
         s.ref = rec->d.allele[0][0];
         s.alt = rec->d.allele[1][0];
-        s.needs_read_vaf = true;
         snvs.push_back(s);
     }
 
     bcf_destroy(rec);
     bcf_hdr_destroy(hdr);
     bcf_close(fp);
-    return true;
+    if (status < -1) std::cerr << "Error reading prepared somatic VCF: " << vcfFile << "\n";
+    return status >= -1;
 }
 
-bool readGermlineVCF(
-    const std::string& vcfFile,
-    const std::string& sampleName,
-    std::vector<GermlineSNV>& snvs,
-    GermlineVcfStats& stats
-) {
+bool readGermlineVCF(const std::string& vcfFile, std::vector<GermlineSNV>& snvs) {
     snvs.clear();
-    stats = GermlineVcfStats{};
-
     htsFile* fp = bcf_open(vcfFile.c_str(), "r");
     if (!fp) {
         std::cerr << "Error opening germline VCF file: " << vcfFile << "\n";
         return false;
     }
-
     bcf_hdr_t* hdr = bcf_hdr_read(fp);
-    if (!hdr) {
-        std::cerr << "Error reading germline VCF header\n";
+    if (!hdr || bcf_hdr_nsamples(hdr) != 1) {
+        std::cerr << "Error: prepared germline VCF must contain one sample\n";
+        if (hdr) bcf_hdr_destroy(hdr);
         bcf_close(fp);
         return false;
     }
-
-    int sampleIdx = -1;
-    std::string resolvedSampleName;
-    if (!resolveSample(
-            hdr,
-            sampleName,
-            true,
-            "germline",
-            sampleIdx,
-            resolvedSampleName)) {
-        bcf_hdr_destroy(hdr);
-        bcf_close(fp);
-        return false;
-    }
-
     bcf1_t* rec = bcf_init();
     if (!rec) {
-        std::cerr << "Error allocating germline VCF record\n";
         bcf_hdr_destroy(hdr);
         bcf_close(fp);
         return false;
     }
-
-    struct CandidateMarker {
-        GermlineSNV snv;
-        bool isPass;
-    };
-    std::vector<CandidateMarker> candidates;
     int32_t* genotypes = nullptr;
     int genotypeCapacity = 0;
-    const int numSamples = bcf_hdr_nsamples(hdr);
-
-    while (bcf_read(fp, hdr, rec) == 0) {
+    bool valid = true;
+    int status = 0;
+    while ((status = bcf_read(fp, hdr, rec)) == 0) {
         bcf_unpack(rec, BCF_UN_ALL);
-        stats.total_records++;
-
-        const bool isPass =
-            bcf_has_filter(hdr, rec, const_cast<char*>("PASS")) == 1;
-        if (isPass) stats.pass_records++;
-
         if (rec->n_allele != 2 ||
-            std::strlen(rec->d.allele[0]) != 1 ||
-            std::strlen(rec->d.allele[1]) != 1) {
-            continue;
+            bcf_get_genotypes(hdr, rec, &genotypes, &genotypeCapacity) < 2) {
+            std::cerr << "Error: invalid marker in prepared germline VCF\n";
+            valid = false;
+            break;
         }
-
-        const int genotypeValues = bcf_get_genotypes(
-            hdr, rec, &genotypes, &genotypeCapacity);
-        if (genotypeValues <= 0 || numSamples <= 0) continue;
-        const int ploidy = genotypeValues / numSamples;
-        if (ploidy < 2) continue;
-
-        int32_t* sampleGt = genotypes + sampleIdx * ploidy;
-        if (bcf_gt_is_missing(sampleGt[0]) ||
-            bcf_gt_is_missing(sampleGt[1]) ||
-            !bcf_gt_is_phased(sampleGt[1])) {
-            continue;
-        }
-
-        const int allele0 = bcf_gt_allele(sampleGt[0]);
-        const int allele1 = bcf_gt_allele(sampleGt[1]);
-        int altHaplotype = 0;
-        if (allele0 == 1 && allele1 == 0) {
-            altHaplotype = 1;
-        } else if (allele0 == 0 && allele1 == 1) {
-            altHaplotype = 2;
-        } else {
-            continue;
-        }
-
-        candidates.push_back({
-            GermlineSNV{
-                bcf_hdr_id2name(hdr, rec->rid),
-                static_cast<int>(rec->pos + 1),
-                rec->d.allele[0][0],
-                rec->d.allele[1][0],
-                altHaplotype
-            },
-            isPass
+        snvs.push_back({
+            bcf_hdr_id2name(hdr, rec->rid), static_cast<int>(rec->pos + 1),
+            rec->d.allele[0][0], rec->d.allele[1][0],
+            bcf_gt_allele(genotypes[0]) == 1 ? 1 : 2
         });
     }
-
-    if (genotypes != nullptr) free(genotypes);
+    free(genotypes);
     bcf_destroy(rec);
     bcf_hdr_destroy(hdr);
     bcf_close(fp);
-
-    const bool requirePass = stats.pass_records > 0;
-    snvs.reserve(candidates.size());
-    for (const auto& candidate : candidates) {
-        if (!requirePass || candidate.isPass) {
-            snvs.push_back(candidate.snv);
-        }
-    }
-    stats.eligible_records = static_cast<int>(snvs.size());
-
-    std::cout << "[germline_vcf] total_records=" << stats.total_records
-              << " pass_records=" << stats.pass_records
-              << " require_pass=" << (requirePass ? 1 : 0)
-              << " eligible_records=" << stats.eligible_records
-              << " skipped_records="
-              << (stats.total_records - stats.eligible_records) << "\n";
-    return true;
+    if (status < -1) std::cerr << "Error reading prepared germline VCF\n";
+    return valid && status >= -1;
 }
 
 struct ParsedPileupRow {
     std::string chrom;
     int pos = 0;
     std::vector<std::string> readNames;
-    std::vector<std::string> hpTags;
     std::string bases;
 };
 
@@ -270,7 +128,6 @@ static std::vector<std::string> splitCommaSeparated(
 
 static bool parsePileupLine(
     const std::string& line,
-    bool parseHpTags,
     ParsedPileupRow& row
 ) {
     std::vector<std::string> fields;
@@ -285,7 +142,7 @@ static bool parsePileupLine(
         fieldStart = fieldEnd + 1;
     }
 
-    const std::size_t blockWidth = parseHpTags ? 5 : 4;
+    constexpr std::size_t blockWidth = 4;
     if (fields.size() < 3 + blockWidth ||
         (fields.size() - 3) % blockWidth != 0) {
         return false;
@@ -293,12 +150,13 @@ static bool parsePileupLine(
 
     row.chrom = fields[0];
     try {
-        row.pos = std::stoi(fields[1]);
+        std::size_t parsed = 0;
+        row.pos = std::stoi(fields[1], &parsed);
+        if (parsed != fields[1].size() || row.pos < 1) return false;
     } catch (const std::exception&) {
         return false;
     }
     row.readNames.clear();
-    row.hpTags.clear();
     row.bases.clear();
 
     for (std::size_t blockStart = 3;
@@ -306,7 +164,9 @@ static bool parsePileupLine(
          blockStart += blockWidth) {
         int depth = 0;
         try {
-            depth = std::stoi(fields[blockStart]);
+            std::size_t parsed = 0;
+            depth = std::stoi(fields[blockStart], &parsed);
+            if (parsed != fields[blockStart].size() || depth < 0) return false;
         } catch (const std::exception&) {
             return false;
         }
@@ -317,21 +177,14 @@ static bool parsePileupLine(
         const std::string& rawBases = fields[blockStart + 1];
         const auto blockReadNames =
             splitCommaSeparated(fields[blockStart + 3]);
+        if (blockReadNames.size() != static_cast<std::size_t>(depth)) return false;
         row.readNames.insert(
             row.readNames.end(),
             blockReadNames.begin(),
             blockReadNames.end()
         );
-        if (parseHpTags) {
-            const auto blockHpTags =
-                splitCommaSeparated(fields[blockStart + 4]);
-            row.hpTags.insert(
-                row.hpTags.end(),
-                blockHpTags.begin(),
-                blockHpTags.end()
-            );
-        }
 
+        const std::size_t baseStart = row.bases.size();
         for (std::size_t i = 0; i < rawBases.size();) {
             const char c = rawBases[i];
             if (c == '+' || c == '-') {
@@ -343,19 +196,19 @@ static bool parsePileupLine(
                        )) {
                     number += rawBases[j++];
                 }
-                if (number.empty()) {
-                    ++i;
-                    continue;
+                if (number.empty()) return false;
+                try {
+                    const int length = std::stoi(number);
+                    if (length < 1 || static_cast<std::size_t>(length) > rawBases.size() - j) return false;
+                    i = j + static_cast<std::size_t>(length);
+                } catch (const std::exception&) {
+                    return false;
                 }
-                const int length = std::stoi(number);
-                i = std::min(
-                    rawBases.size(),
-                    j + static_cast<std::size_t>(length)
-                );
                 continue;
             }
             if (c == '^') {
-                i = std::min(rawBases.size(), i + 2);
+                if (i + 1 >= rawBases.size()) return false;
+                i += 2;
                 continue;
             }
             if (c == '$') {
@@ -365,14 +218,14 @@ static bool parsePileupLine(
             row.bases += c;
             ++i;
         }
+        if (row.bases.size() - baseStart != static_cast<std::size_t>(depth)) return false;
     }
     return true;
 }
 
-std::unordered_map<std::string, PositionInfo> readMpileup(
+std::unordered_map<std::string, HaplotypeSnvSummary> summarizeSomaticMpileup(
     const std::string& mpileupFile,
     const std::vector<SNV>& snvs,
-    bool parseBamHpTags,
     const std::unordered_map<std::string, int>* externalReadHp
 ) {
     std::unordered_map<std::string, std::pair<char, char>> refAltLookup;
@@ -381,11 +234,10 @@ std::unordered_map<std::string, PositionInfo> readMpileup(
             {snv.ref, snv.alt};
     }
 
-    std::unordered_map<std::string, PositionInfo> result;
+    std::unordered_map<std::string, HaplotypeSnvSummary> result;
     std::ifstream input(mpileupFile);
     if (!input.is_open()) {
-        std::cerr << "Error opening mpileup: " << mpileupFile << "\n";
-        return result;
+        throw std::runtime_error("Cannot open mpileup: " + mpileupFile);
     }
 
     std::string line;
@@ -393,44 +245,25 @@ std::unordered_map<std::string, PositionInfo> readMpileup(
         if (line.empty()) continue;
 
         ParsedPileupRow row;
-        if (!parsePileupLine(line, parseBamHpTags, row)) continue;
+        if (!parsePileupLine(line, row))
+            throw std::runtime_error("Malformed somatic mpileup row in " + mpileupFile);
         const std::string key =
             row.chrom + ":" + std::to_string(row.pos);
         auto alleleIt = refAltLookup.find(key);
         if (alleleIt == refAltLookup.end()) continue;
 
-        if (row.readNames.size() != row.bases.size()) {
-            std::cerr << "Warning: read count != parsed base count at "
-                      << row.chrom << ":" << row.pos << " ("
-                      << row.readNames.size() << " vs "
-                      << row.bases.size() << ")\n";
-        }
-
         PositionInfo info;
         info.ref = alleleIt->second.first;
         info.alt = alleleIt->second.second;
         const std::size_t observationCount =
-            std::min(row.readNames.size(), row.bases.size());
+            row.readNames.size();
         for (std::size_t i = 0; i < observationCount; ++i) {
             const std::string& readName = row.readNames[i];
             info.readBase[readName] = row.bases[i];
-
-            if (externalReadHp != nullptr) {
-                auto hpIt = externalReadHp->find(readName);
-                if (hpIt != externalReadHp->end() &&
-                    (hpIt->second == 1 || hpIt->second == 2)) {
-                    info.readHP[readName] = hpIt->second;
-                }
-            } else if (parseBamHpTags && i < row.hpTags.size()) {
-                if (row.hpTags[i] == "1") {
-                    info.readHP[readName] = 1;
-                } else if (row.hpTags[i] == "2") {
-                    info.readHP[readName] = 2;
-                }
-            }
         }
-        result[key] = std::move(info);
+        result[key] = summarizeSnvReads(info, externalReadHp);
     }
+    if (input.bad()) throw std::runtime_error("Cannot finish reading mpileup: " + mpileupFile);
     return result;
 }
 
@@ -440,21 +273,22 @@ void collectReadNamesFromMpileup(
 ) {
     std::ifstream input(mpileupFile);
     if (!input.is_open()) {
-        std::cerr << "Error opening mpileup: " << mpileupFile << "\n";
-        return;
+        throw std::runtime_error("Cannot open mpileup: " + mpileupFile);
     }
 
     std::string line;
     while (std::getline(input, line)) {
         if (line.empty()) continue;
         ParsedPileupRow row;
-        if (!parsePileupLine(line, false, row)) continue;
+        if (!parsePileupLine(line, row))
+            throw std::runtime_error("Malformed mpileup row in " + mpileupFile);
         const std::size_t observationCount =
-            std::min(row.readNames.size(), row.bases.size());
+            row.readNames.size();
         for (std::size_t i = 0; i < observationCount; ++i) {
             readNames.insert(row.readNames[i]);
         }
     }
+    if (input.bad()) throw std::runtime_error("Cannot finish reading mpileup: " + mpileupFile);
 }
 
 std::size_t accumulateGermlineVotes(
@@ -471,9 +305,7 @@ std::size_t accumulateGermlineVotes(
 
     std::ifstream input(mpileupFile);
     if (!input.is_open()) {
-        std::cerr << "Error opening germline mpileup: "
-                  << mpileupFile << "\n";
-        return 0;
+        throw std::runtime_error("Cannot open germline mpileup: " + mpileupFile);
     }
 
     std::size_t informativeObservations = 0;
@@ -481,7 +313,8 @@ std::size_t accumulateGermlineVotes(
     while (std::getline(input, line)) {
         if (line.empty()) continue;
         ParsedPileupRow row;
-        if (!parsePileupLine(line, false, row)) continue;
+        if (!parsePileupLine(line, row))
+            throw std::runtime_error("Malformed mpileup row in " + mpileupFile);
 
         const std::string key =
             row.chrom + ":" + std::to_string(row.pos);
@@ -490,7 +323,7 @@ std::size_t accumulateGermlineVotes(
         const GermlineSNV& marker = *markerIt->second;
 
         const std::size_t observationCount =
-            std::min(row.readNames.size(), row.bases.size());
+            row.readNames.size();
         for (std::size_t i = 0; i < observationCount; ++i) {
             const std::string& readName = row.readNames[i];
             if (candidateReads.find(readName) == candidateReads.end()) {
@@ -519,88 +352,38 @@ std::size_t accumulateGermlineVotes(
             informativeObservations++;
         }
     }
+    if (input.bad()) throw std::runtime_error("Cannot finish reading germline mpileup: " + mpileupFile);
     return informativeObservations;
 }
 
 
-static void hpSummaryForAltSupportingReads(
-    const PositionInfo& p,
-    std::string& hp_label,
-    float& hp_proportion,
-    int& hp1_ref_reads,
-    int& hp1_alt_reads,
-    int& hp2_ref_reads,
-    int& hp2_alt_reads,
-    int& nohp_ref_reads,
-    int& nohp_alt_reads,
-    int& total_coverage_reads
+HaplotypeSnvSummary summarizeSnvReads(
+    const PositionInfo& p, const std::unordered_map<std::string, int>* readHaplotypes
 ) {
-    int hp1_ref = 0;
-    int hp1 = 0;
-    int hp2_ref = 0;
-    int hp2 = 0;
-    int nohp_ref = 0;
-    int nohp = 0;
-    total_coverage_reads = static_cast<int>(p.readBase.size());
+    HaplotypeSnvSummary summary;
+    summary.total_coverage = static_cast<int>(p.readBase.size());
     for (const auto& [read, base] : p.readBase) {
-        bool isAlt = (std::toupper(base) == std::toupper(p.alt));
-        bool isRef = (base == '.' || base == ',' ||
-                      std::toupper(base) == std::toupper(p.ref));
+        const bool isAlt = (std::toupper(static_cast<unsigned char>(base)) == std::toupper(static_cast<unsigned char>(p.alt)));
+        const bool isRef = (base == '.' || base == ',' ||
+                            std::toupper(static_cast<unsigned char>(base)) == std::toupper(static_cast<unsigned char>(p.ref)));
         if (!isAlt && !isRef) continue;
-        auto itHP = p.readHP.find(read);
-        if (itHP == p.readHP.end()) {
-            if (isAlt) nohp++;
-            else nohp_ref++;
-            continue;
+        int hp = 0;
+        if (readHaplotypes != nullptr) {
+            const auto assignment = readHaplotypes->find(read);
+            if (assignment != readHaplotypes->end()) hp = assignment->second;
         }
-        if (itHP->second == 1) {
-            if (isAlt) hp1++;
-            else hp1_ref++;
-        } else if (itHP->second == 2) {
-            if (isAlt) hp2++;
-            else hp2_ref++;
+        if (hp == 1) {
+            if (isAlt) summary.hp1_alt_reads++;
+            else summary.hp1_ref_reads++;
+        } else if (hp == 2) {
+            if (isAlt) summary.hp2_alt_reads++;
+            else summary.hp2_ref_reads++;
         } else {
-            if (isAlt) nohp++;
-            else nohp_ref++;
+            if (isAlt) summary.nohp_alt_reads++;
+            else summary.nohp_ref_reads++;
         }
     }
-
-    hp1_ref_reads = hp1_ref;
-    hp1_alt_reads = hp1;
-    hp2_ref_reads = hp2_ref;
-    hp2_alt_reads = hp2;
-    nohp_ref_reads = nohp_ref;
-    nohp_alt_reads = nohp;
-    const int total = hp1 + hp2;
-    if (total == 0) {
-        hp_label = "UNKNOWN";
-        hp_proportion = 0.0f;
-        return;
-    }
-    const int minor = std::min(hp1, hp2);
-    if (100LL * minor > 15LL * total) {
-        hp_label = "MIXED";
-        hp_proportion = static_cast<float>(std::max(hp1, hp2)) /
-                        static_cast<float>(total);
-        return;
-    }
-    hp_label = (hp1 > hp2) ? "HP1" : "HP2";
-    hp_proportion = static_cast<float>(std::max(hp1, hp2)) / static_cast<float>(total);
-}
-
-void annotateSNVHpSummary(SNV& snv, const PositionInfo& p) {
-    hpSummaryForAltSupportingReads(
-        p,
-        snv.hp_label,
-        snv.hp_proportion,
-        snv.hp1_ref_reads,
-        snv.hp1_alt_reads,
-        snv.hp2_ref_reads,
-        snv.hp2_alt_reads,
-        snv.nohp_ref_reads,
-        snv.nohp_alt_reads,
-        snv.total_coverage_reads
-    );
+    return summary;
 }
 
 bool calculateHaplotypeVaf(
@@ -614,107 +397,4 @@ bool calculateHaplotypeVaf(
     vaf = static_cast<float>(altReads) /
           static_cast<float>(alleleDepth);
     return true;
-}
-
-bool calculateVafFromReads(
-    const SNV& snv,
-    const PositionInfo& p,
-    float& vaf
-) {
-    int refReads = 0;
-    int altReads = 0;
-    for (const auto& [read, base] : p.readBase) {
-        (void)read;
-        const bool isAlt =
-            std::toupper(base) == std::toupper(snv.alt);
-        const bool isRef =
-            base == '.' || base == ',' ||
-            std::toupper(base) == std::toupper(snv.ref);
-        if (isAlt) {
-            altReads++;
-        } else if (isRef) {
-            refReads++;
-        }
-    }
-
-    const int alleleDepth = refReads + altReads;
-    if (alleleDepth == 0) return false;
-
-    vaf = static_cast<float>(altReads) /
-          static_cast<float>(alleleDepth);
-    return true;
-}
-
-static std::string assignedHaplotypeVaf(const SNV& snv) {
-    int refReads = 0;
-    int altReads = 0;
-    if (snv.hp_label == "HP1") {
-        refReads = snv.hp1_ref_reads;
-        altReads = snv.hp1_alt_reads;
-    } else if (snv.hp_label == "HP2") {
-        refReads = snv.hp2_ref_reads;
-        altReads = snv.hp2_alt_reads;
-    } else {
-        return "NA";
-    }
-
-    float vaf = 0.0f;
-    if (!calculateHaplotypeVaf(refReads, altReads, vaf)) return "NA";
-    return std::to_string(vaf);
-}
-
-void compareSNVs(const SNV& s1, const SNV& s2,
-                 const PositionInfo& p1, const PositionInfo& p2,
-                 std::ostream& out)
-{
-    int altAlt = 0;
-    int altRef = 0;
-    int refAlt = 0;
-    int refRef = 0;
-
-    for (const auto& [read, base1] : p1.readBase) {
-        auto it2 = p2.readBase.find(read);
-
-        if (it2 == p2.readBase.end()) {
-            continue;
-        }
-
-        char base2 = it2->second;
-
-        bool isAlt1 = (std::toupper(base1) == std::toupper(p1.alt));
-        bool isRef1 = (std::toupper(base1) == std::toupper(p1.ref));
-        bool isAlt2 = (std::toupper(base2) == std::toupper(p2.alt));
-        bool isRef2 = (std::toupper(base2) == std::toupper(p2.ref));
-
-        // skip ambiguous bases
-        if ((!isAlt1 && !isRef1) || (!isAlt2 && !isRef2))
-           continue;
-
-        if (isAlt1 && isAlt2) altAlt++;
-        else if (isAlt1 && !isAlt2) altRef++;
-        else if (!isAlt1 && isAlt2) refAlt++;
-        else if (!isAlt1 && !isAlt2) refRef++;
-    }
-
-    std::string hap1 = s1.hp_label;
-    std::string hap2 = s2.hp_label;
-    int hp1_reads1 = s1.hp1_alt_reads;
-    int hp2_reads1 = s1.hp2_alt_reads;
-    int hp1_reads2 = s2.hp1_alt_reads;
-    int hp2_reads2 = s2.hp2_alt_reads;
-
-    out << s1.chrom << "\t" << s1.pos << "\t" << s2.pos
-        << "\tVAF1=" << s1.vaf << "\tVAF2=" << s2.vaf
-        << "\tHVAF1=" << assignedHaplotypeVaf(s1)
-        << "\tHVAF2=" << assignedHaplotypeVaf(s2)
-        << "\tALT_ALT=" << altAlt
-        << "\tALT_REF=" << altRef
-        << "\tREF_ALT=" << refAlt
-        << "\tREF_REF=" << refRef
-        << "\tTOTAL=" << (altAlt + altRef + refAlt + refRef)
-        << "\tHAP1=" << hap1
-        << "\tHAP2=" << hap2
-        << "\tHP_READS1=" << hp1_reads1 << "/" << hp2_reads1
-        << "\tHP_READS2=" << hp1_reads2 << "/" << hp2_reads2
-        << "\n";
 }

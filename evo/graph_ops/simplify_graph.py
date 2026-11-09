@@ -299,12 +299,7 @@ def build_simplified_graph(graph, source_name, name=None):
     for node_id, node in nodes_by_id.items():
         data = node["data"]
         data["source_chunk"] = source_name
-        gene_name = data.get("gene_name")
-        data["label"] = (
-            f"{data['position']}\n{gene_name}"
-            if gene_name
-            else str(data["position"])
-        )
+        data["label"] = str(data["position"])
         if "position" in node:
             node["position"]["y"] = node_y(
                 node_id,

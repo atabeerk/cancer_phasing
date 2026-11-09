@@ -1,91 +1,10 @@
 # graph_ops/parsing.py
 
 import os
+import re
 from typing import List, Tuple, Dict, Optional
 
 from models import Edge
-
-
-def _first_present(kv: Dict[str, str], keys: List[str]) -> Optional[str]:
-    for k in keys:
-        if k in kv:
-            return kv[k]
-    return None
-
-
-def _normalize_haplotype_tag(raw: Optional[str]) -> Optional[str]:
-    if raw is None:
-        return None
-    s = str(raw).strip().upper()
-    if not s:
-        return None
-
-    alias = {
-        "1": "HP1",
-        "HP1": "HP1",
-        "H1": "HP1",
-        "HAP1": "HP1",
-        "HAPLOTYPE1": "HP1",
-        "2": "HP2",
-        "HP2": "HP2",
-        "H2": "HP2",
-        "HAP2": "HP2",
-        "HAPLOTYPE2": "HP2",
-        "UNK": "UNKNOWN",
-        "UNKNOWN": "UNKNOWN",
-        "NA": "UNKNOWN",
-        ".": "UNKNOWN",
-    }
-    return alias.get(s, s)
-
-
-def parse_haplotype_tags(kv: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Parse optional haplotype tags for the two SNVs in a row.
-    Supports several key naming conventions for forward compatibility.
-    """
-    hap1_raw = _first_present(
-        kv,
-        ["HP1", "HAP1", "HAPLOTYPE1", "SNP1_HP", "SNP1_HAP", "SNP1_HAPLOTYPE"],
-    )
-    hap2_raw = _first_present(
-        kv,
-        ["HP2", "HAP2", "HAPLOTYPE2", "SNP2_HP", "SNP2_HAP", "SNP2_HAPLOTYPE"],
-    )
-    return _normalize_haplotype_tag(hap1_raw), _normalize_haplotype_tag(hap2_raw)
-
-
-def _normalize_hp_reads(raw: Optional[str]) -> Optional[str]:
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
-    su = s.upper()
-    if su in {"UNK", "UNKNOWN", "NA", "."}:
-        return "UNKNOWN"
-    if "/" in s:
-        a, b = s.split("/", 1)
-        try:
-            ai = int(a)
-            bi = int(b)
-            if ai >= 0 and bi >= 0:
-                return f"{ai}/{bi}"
-        except ValueError:
-            pass
-    return s
-
-
-def parse_hp_reads(kv: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
-    hp1_raw = _first_present(
-        kv,
-        ["HP_READS1", "SNP1_HP_READS", "HPREADS1", "SNP1_HPREADS"],
-    )
-    hp2_raw = _first_present(
-        kv,
-        ["HP_READS2", "SNP2_HP_READS", "HPREADS2", "SNP2_HPREADS"],
-    )
-    return _normalize_hp_reads(hp1_raw), _normalize_hp_reads(hp2_raw)
 
 
 def _parse_optional_float(raw: Optional[str]) -> Optional[float]:
@@ -133,9 +52,9 @@ def parse_snv_line(line: str) -> Tuple[str, int, int, Dict[str, str]]:
 
 def load_edges_from_base(base_path: str) -> List[Edge]:
     """
-    Load edges for a single chunk, given the 'base' used in C++:
+    Load inferred relationships for a single chromosome comparison base:
 
-        base = original_chunk_filename_without_extension
+        base = comparison_filename_without_extension
 
     This function looks for:
 
@@ -144,7 +63,6 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
         base + "_snp1_before_snp2.txt"
         base + "_snp2_before_snp1.txt"
 
-    and ignores base + "_errors.txt".
     """
 
     # Map file suffix → (relation, orientation).
@@ -182,12 +100,12 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
                 vaf2 = float(kv.get("VAF2", "0.0"))
                 hvaf1, hvaf2 = parse_hvafs(kv)
 
-                # Reliability and scoring info from C++
+                # Reliability and scoring info from window-tree inference
                 reliability = float(kv.get("RELIABILITY", "0.0"))
                 best_score = float(kv.get("BEST_SCORE", "0.0"))
                 margin = float(kv.get("MARGIN", "0.0"))
-                hap1, hap2 = parse_haplotype_tags(kv)
-                hp_reads1, hp_reads2 = parse_hp_reads(kv)
+                hap1, hap2 = kv.get("HAP1"), kv.get("HAP2")
+                hp_reads1, hp_reads2 = kv.get("HP_READS1"), kv.get("HP_READS2")
 
                 # For timing relations, orient u->v using snp1_before_snp2 vs snp2_before_snp1
                 if relation == "timing":
@@ -245,45 +163,12 @@ def load_edges_from_base(base_path: str) -> List[Edge]:
 
 
 def find_chunk_bases(chunk_dir: str) -> List[str]:
-    """
-    Discover chunk 'base' paths in chunk_dir, i.e. the original
-
-        chunk_chr_start_end.txt
-
-    file names (without the .txt). We skip the per-relation files like
-    *_cooccurring.txt, *_divergent.txt, etc.
-    """
-    relation_suffixes = [
-        "_cooccurring.txt",
-        "_cooccurring_loss.txt",
-        "_divergent.txt",
-        "_snp1_before_snp2.txt",
-        "_snp2_before_snp1.txt",
-        "_snp1_before_snp2_loss.txt",
-        "_snp2_before_snp1_loss.txt",
-        "_errors.txt",
-    ]
-
-    bases: List[str] = []
-    for fname in os.listdir(chunk_dir):
-        # Only process canonical chunk comparison files produced by the C++ pipeline.
-        # This intentionally excludes sidecar files (e.g. macOS ._ AppleDouble files)
-        # and any other .txt artifacts that do not start with the required prefix.
-        if not fname.startswith("chunk_"):
-            continue
-        if not fname.endswith(".txt"):
-            continue
-        full = os.path.join(chunk_dir, fname)
-
-        if any(fname.endswith(suf) for suf in relation_suffixes):
-            continue
-
-        # This should be the original chunk comparison file; strip '.txt' to get base.
-        base = full[: -len(".txt")]
-        bases.append(base)
-
-    bases.sort()
-    return bases
+    """Discover canonical chunk_<chromosome>_<start>_<end>.txt comparisons."""
+    return sorted(
+        os.path.join(chunk_dir, filename[:-4])
+        for filename in os.listdir(chunk_dir)
+        if re.fullmatch(r"chunk_.+_\d+_\d+\.txt", filename)
+    )
 
 
 def parse_chunk_base(base_path: str) -> Tuple[str, int, int]:

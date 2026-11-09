@@ -9,10 +9,19 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
-from parsing import find_chunk_bases, group_chunk_bases_by_chromosome, load_edges_from_base
-from builder import GraphBuilder
+from parsing import (
+    find_chunk_bases,
+    group_chunk_bases_by_chromosome,
+    load_edges_from_base,
+)
 from fast_builder import FastGraphBuilder
-from export_graph import export_cytoscape_json, export_condensed_cytoscape_json, write_inconsistency_log, write_accepted_edges
+from export_graph import (
+    export_condensed_cytoscape_json,
+    export_cytoscape_json,
+    write_accepted_edges,
+    write_rejected_edges,
+)
+from simplify_graph import write_simplified_graph
 from component_stats import compute_component_statistics_rows, append_component_statistics_tsv
 
 
@@ -98,7 +107,6 @@ def merge_chunk_outputs_by_chromosome(chunk_dir, bases):
     return sorted(merged_bases)
 
 
-
 def _new_edge_haplotype_counters():
     return {
         relation: {
@@ -114,15 +122,8 @@ def _new_edge_haplotype_counters():
 
 
 def _normalize_hp(hp):
-    if hp is None:
-        return "UNKNOWN"
-    s = str(hp).strip().upper()
-    if s in {"HP1", "1", "H1"}:
-        return "HP1"
-    if s in {"HP2", "2", "H2"}:
-        return "HP2"
-    # Per requirement, treat MIXED as UNKNOWN.
-    return "UNKNOWN"
+    # Treat MIXED and missing assignments as unknown for these counters.
+    return hp if hp in {"HP1", "HP2"} else "UNKNOWN"
 
 
 def _update_edge_haplotype_counters(counters, edge):
@@ -148,11 +149,11 @@ def _update_edge_haplotype_counters(counters, edge):
 
 def _load_snv_assignment_counts(chrom_out_dir):
     """
-    Load per-SNV assignment counts from haplotagged_snvs.tsv.
+    Load per-SNV assignment counts from snv_counts.tsv.
     Returns counts over all filtered SNVs in this chromosome run.
     """
     counts = {"HP1": 0, "HP2": 0, "MIXED": 0, "UNKNOWN": 0}
-    path = os.path.join(chrom_out_dir, "haplotagged_snvs.tsv")
+    path = os.path.join(chrom_out_dir, "snv_counts.tsv")
     if not os.path.exists(path):
         return counts
 
@@ -185,19 +186,13 @@ def main():
     parser.add_argument(
         "--outdir",
         required=True,
-        help="Directory where Cytoscape JSON and inconsistency logs will be written.",
+        help="Directory where Cytoscape JSON and accepted/rejected edge files will be written.",
     )
     parser.add_argument(
         "--total-snvs",
         type=int,
         default=0,
         help="Total number of SNVs in the filtered VCF (for connectivity reporting).",
-    )
-    parser.add_argument(
-        "--builder",
-        choices=("fast", "legacy"),
-        default="fast",
-        help="Graph consistency builder implementation to use.",
     )
     parser.add_argument(
         "--progress-interval",
@@ -226,12 +221,10 @@ def main():
 
     chromosome_groups = group_chunk_bases_by_chromosome(bases)
 
-    builder_cls = FastGraphBuilder if args.builder == "fast" else GraphBuilder
     print(
         f"[graph_ops] Found {len(bases)} chunk(s) across "
         f"{len(chromosome_groups)} chromosome(s) in {chunk_dir}", flush=True
     )
-    print(f"[graph_ops] Builder: {args.builder}", flush=True)
 
     all_relation_positions = set()
     all_graph_nodes = set()
@@ -242,8 +235,6 @@ def main():
 
     for chrom, chunk_records in chromosome_groups.items():
         chrom_t0 = time.monotonic()
-        core_start = min(record[1] for record in chunk_records)
-        core_end = max(record[2] for record in chunk_records)
         basename = chrom
         print(
             f"[graph_ops] Processing chromosome: {chrom} "
@@ -269,7 +260,7 @@ def main():
             all_relation_positions.add((e.chrom, e.u))
             all_relation_positions.add((e.chrom, e.v))
 
-        builder = builder_cls()
+        builder = FastGraphBuilder()
         build_t0 = time.monotonic()
         accepted = 0
         for idx, e in enumerate(edges, start=1):
@@ -289,6 +280,8 @@ def main():
             flush=True,
         )
 
+        rejected_edges = builder.rejected_edges
+
         all_graph_nodes.update((chrom, node) for node in builder.nodes)
         total_accepted_edges += len(builder.edges)
         for e in builder.edges:
@@ -304,90 +297,35 @@ def main():
             chunk_base=basename,
             chromosome=chrom,
         )
-        partition_specs = [
-            (basename, core_start, core_end, set(builder.nodes), component_rows)
-        ]
+        json_path = os.path.join(outdir, f"{basename}.json")
+        condensed_json_path = os.path.join(outdir, f"{basename}_condensed.json")
+        simplified_json_path = os.path.join(outdir, f"{basename}_simplified.json")
+        accepted_path = os.path.join(outdir, f"{basename}_accepted_edges.txt")
+        rejected_path = os.path.join(outdir, f"{basename}_rejected_edges.txt")
 
-        partition_paths = []
-        written_accepted_edges = 0
-        written_inconsistencies = 0
-
-        for (
-            partition_base,
-            partition_start,
-            partition_end,
-            partition_nodes,
-            partition_rows,
-        ) in partition_specs:
-            json_path = os.path.join(outdir, f"{partition_base}.json")
-            condensed_json_path = os.path.join(
-                outdir,
-                f"{partition_base}_condensed.json",
-            )
-            accepted_path = os.path.join(
-                outdir,
-                f"{partition_base}_accepted_edges.txt",
-            )
-            log_path = os.path.join(
-                outdir,
-                f"{partition_base}_inconsistencies.tsv",
-            )
-
-            export_cytoscape_json(
-                builder,
-                json_path,
-                name=partition_base,
-                node_subset=partition_nodes,
-            )
-            export_condensed_cytoscape_json(
-                builder,
-                condensed_json_path,
-                name=partition_base + "_condensed",
-                node_subset=partition_nodes,
-            )
-            written_accepted_edges += write_accepted_edges(
-                builder,
-                accepted_path,
-                region_start=partition_start,
-                region_end=partition_end,
-            )
-            written_inconsistencies += write_inconsistency_log(
-                builder,
-                log_path,
-                region_start=partition_start,
-                region_end=partition_end,
-            )
-
-            stats_rows = []
-            for component_id, row in enumerate(partition_rows):
-                output_row = dict(row)
-                output_row["chunk_base"] = partition_base
-                output_row["component_id"] = component_id
-                stats_rows.append(output_row)
-            append_component_statistics_tsv(stats_rows, component_stats_path)
-            partition_paths.append((json_path, condensed_json_path, accepted_path, log_path))
-
-        if written_accepted_edges != len(builder.edges):
-            raise AssertionError(
-                "Final graph regions do not cover every accepted edge: "
-                f"wrote={written_accepted_edges} accepted={len(builder.edges)}"
-            )
-        if written_inconsistencies != len(builder.inconsistencies):
-            raise AssertionError(
-                "Final graph regions do not cover every inconsistency: "
-                f"wrote={written_inconsistencies} "
-                f"inconsistencies={len(builder.inconsistencies)}"
-            )
-
+        export_cytoscape_json(builder, json_path, name=basename, rejected_edges=rejected_edges)
+        simplified_stats = write_simplified_graph(json_path, simplified_json_path)
+        export_condensed_cytoscape_json(builder, condensed_json_path, name=basename + "_condensed")
+        write_accepted_edges(builder, accepted_path)
+        write_rejected_edges(rejected_edges, rejected_path)
+        append_component_statistics_tsv(component_rows, component_stats_path)
+        print(
+            "[graph_ops]   simplified "
+            f"cross_haplotype_removed={simplified_stats['removed_cross_haplotype_edges']} "
+            f"cooccurring={simplified_stats['cooccurring_edges_before']}"
+            f"->{simplified_stats['cooccurring_edges_after']} "
+            f"timing_deduplicated={simplified_stats['timing_edges_dropped']} "
+            f"divergent_deduplicated={simplified_stats['divergent_edges_dropped']} "
+            f"inferred_clusters={simplified_stats['fragmented_cooccurring_clusters']}",
+            flush=True,
+        )
         print(
             f"[graph_ops]   export_done chromosome={chrom} "
-            f"json_partitions={len(partition_paths)} "
             f"elapsed={time.monotonic() - export_t0:.3f}s",
             flush=True,
         )
-
         print(
-            f"[graph_ops]   -> wrote {len(partition_paths)} graph JSON partition(s) with matching edge files\n"
+            f"[graph_ops]   -> wrote chromosome graph JSONs with matching edge files\n"
             f"(nodes: {len(builder.nodes)}, edges: {len(builder.edges)})"
             f"\nchromosome_elapsed={time.monotonic() - chrom_t0:.3f}s",
             flush=True,
