@@ -1,0 +1,503 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Set, Tuple
+
+from models import Edge, RejectedEdge
+
+
+@dataclass(frozen=True)
+class BoundarySignature:
+    relation: str
+    direction: Optional[str]
+
+    def flipped(self) -> "BoundarySignature":
+        if self.relation != "timing":
+            return self
+        if self.direction == "out":
+            return BoundarySignature(self.relation, "in")
+        if self.direction == "in":
+            return BoundarySignature(self.relation, "out")
+        return self
+
+
+class FastGraphBuilder:
+    """
+    Build a consistent graph in reliability order.
+
+    Cluster boundary and reachability indexes are updated as edges are accepted.
+    """
+
+    def __init__(self):
+        self.nodes: Set[int] = set()
+        self.edges: List[Edge] = []
+        self.pair_edge: Dict[Tuple[int, int], Edge] = {}
+        self.adj: Dict[int, Dict[int, Edge]] = defaultdict(dict)
+
+        self.parent: Dict[int, int] = {}
+        self.size: Dict[int, int] = {}
+        self.cluster_nodes: Dict[int, Set[int]] = {}
+
+        self.node_vaf: Dict[int, float] = {}
+        self.node_chrom: Dict[int, str] = {}
+        self.node_haplotype: Dict[int, str] = {}
+        self.node_hp_reads: Dict[int, str] = {}
+        self.rejected_edges: List[RejectedEdge] = []
+
+        self.node_to_bit: Dict[int, int] = {}
+        self.bit_owner: List[int] = []
+        self.member_bits: Dict[int, int] = {}
+
+        # boundary[a][b] is expressed from cluster a's perspective.
+        self.boundary: Dict[int, Dict[int, BoundarySignature]] = defaultdict(dict)
+        self.divergent_neighbors: Dict[int, int] = defaultdict(int)
+
+        # Transitive closure bitsets over original node bits, interpreted through
+        # bit_owner/member_bits for current cooccurrence clusters.
+        self.cluster_reach: Dict[int, int] = defaultdict(int)
+        self.cluster_rev_reach: Dict[int, int] = defaultdict(int)
+
+    # -------- Bit helpers --------
+
+    def _ensure_bit(self, node: int) -> int:
+        bit = self.node_to_bit.get(node)
+        if bit is not None:
+            return bit
+        bit = len(self.node_to_bit)
+        self.node_to_bit[node] = bit
+        self.bit_owner.append(node)
+        return bit
+
+    @staticmethod
+    def _bit_mask(bit: int) -> int:
+        return 1 << bit
+
+    def _bits_to_active_reps(self, bits: int) -> Set[int]:
+        reps: Set[int] = set()
+        while bits:
+            lsb = bits & -bits
+            bit = lsb.bit_length() - 1
+            reps.add(self._find(self.bit_owner[bit]))
+            bits ^= lsb
+        return reps
+
+    # -------- Union-find helpers --------
+
+    def _ensure_node_dsu(self, x: int) -> None:
+        if x in self.parent:
+            return
+        bit = self._ensure_bit(x)
+        self.parent[x] = x
+        self.size[x] = 1
+        self.cluster_nodes[x] = {x}
+        self.member_bits[x] = self._bit_mask(bit)
+        self.bit_owner[bit] = x
+
+    def _find(self, x: int) -> int:
+        root = x
+        while self.parent[root] != root:
+            root = self.parent[root]
+        while self.parent[x] != x:
+            nxt = self.parent[x]
+            self.parent[x] = root
+            x = nxt
+        return root
+
+    # -------- Rejections and node metadata --------
+
+    def _reject_edge(self, edge: Edge, reason: str) -> None:
+        self.rejected_edges.append(RejectedEdge(edge=edge, reason=reason))
+
+    def _register_node_vaf(self, node: int, vaf: float) -> None:
+        if node not in self.node_vaf:
+            self.node_vaf[node] = vaf
+
+    def _register_node_chrom(self, node: int, chrom: str) -> None:
+        self.node_chrom.setdefault(node, chrom)
+
+    def _register_node_haplotype(self, node: int, haplotype: Optional[str]) -> None:
+        if haplotype is None:
+            return
+        hp = str(haplotype).strip().upper()
+        if not hp:
+            return
+        existing = self.node_haplotype.get(node)
+        if existing is None:
+            self.node_haplotype[node] = hp
+        elif existing != hp:
+            self.node_haplotype[node] = "MIXED"
+
+    def _register_node_hp_reads(self, node: int, hp_reads: Optional[str]) -> None:
+        if hp_reads is None:
+            return
+        value = str(hp_reads).strip()
+        if not value:
+            return
+        existing = self.node_hp_reads.get(node)
+        if existing is None:
+            self.node_hp_reads[node] = value
+        elif existing != value:
+            self.node_hp_reads[node] = "MIXED"
+
+    # -------- Indexed consistency checks --------
+
+    def _boundary_between(self, a: int, b: int) -> Optional[BoundarySignature]:
+        return self.boundary.get(a, {}).get(b)
+
+    def _cluster_reachable_by_rep(self, a: int, b: int) -> bool:
+        a = self._find(a)
+        b = self._find(b)
+        if a == b:
+            return True
+        return bool(self.cluster_reach[a] & self.member_bits[b])
+
+    def _check_cooccurring_merge_internal_consistency(self, u: int, v: int, new_edge: Edge) -> bool:
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+        sig = self._boundary_between(ru, rv)
+        if sig is not None:
+            self._reject_edge(new_edge, "cluster_merge_noncooccurring")
+            return False
+        return True
+
+    def _check_cooccurring_merge_boundary_consistency(self, u: int, v: int, new_edge: Edge) -> bool:
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+
+        seen: Dict[int, BoundarySignature] = {}
+        for rep in (ru, rv):
+            for other, sig in self.boundary.get(rep, {}).items():
+                other = self._find(other)
+                if other == ru or other == rv:
+                    continue
+                prev = seen.get(other)
+                if prev is None:
+                    seen[other] = sig
+                    continue
+                if prev.relation != sig.relation or prev.direction != sig.direction:
+                    reason = "cluster_merge_pair_relation_conflict"
+                    if prev.relation == "timing" and sig.relation == "timing":
+                        reason = "cluster_merge_pair_timing_direction_conflict"
+                    self._reject_edge(new_edge, reason)
+                    return False
+        return True
+
+    def _check_cooccurring_merge_timing_acyclic(self, u: int, v: int, new_edge: Edge) -> bool:
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+        if self._cluster_reachable_by_rep(ru, rv) or self._cluster_reachable_by_rep(rv, ru):
+            self._reject_edge(new_edge, "cluster_merge_timing_cycle")
+            return False
+        return True
+
+    def _has_divergent_ancestor_reaching_descendants(
+        self,
+        ancestor_bits: int,
+        descendant_bits: int,
+    ) -> bool:
+        """Whether an ancestor's divergent peer reaches any target descendant."""
+        for ancestor in self._bits_to_active_reps(ancestor_bits):
+            divergent_bits = self.divergent_neighbors[ancestor]
+            for other in self._bits_to_active_reps(divergent_bits):
+                other_descendants = self.cluster_reach[other] | self.member_bits[other]
+                if other_descendants & descendant_bits:
+                    return True
+        return False
+
+    def _check_cooccurring_merge_divergent_shared_descendant(
+        self,
+        u: int,
+        v: int,
+        new_edge: Edge,
+    ) -> bool:
+        """Reject a merge that gives divergent clusters a common descendant."""
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+
+        ancestors_u = self.cluster_rev_reach[ru] | self.member_bits[ru]
+        ancestors_v = self.cluster_rev_reach[rv] | self.member_bits[rv]
+        descendants_u = self.cluster_reach[ru] | self.member_bits[ru]
+        descendants_v = self.cluster_reach[rv] | self.member_bits[rv]
+        if (
+            self._has_divergent_ancestor_reaching_descendants(
+                ancestors_u,
+                descendants_v,
+            )
+            or self._has_divergent_ancestor_reaching_descendants(
+                ancestors_v,
+                descendants_u,
+            )
+        ):
+            self._reject_edge(new_edge, "cluster_merge_divergent_shared_timing_descendant_conflict")
+            return False
+        return True
+
+    def _check_cluster_pair_relation_ok(self, u: int, v: int, new_edge: Edge) -> bool:
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+        sig = self._boundary_between(ru, rv)
+        if sig is None:
+            return True
+        if new_edge.relation == "timing":
+            if sig.relation != "timing":
+                self._reject_edge(new_edge, "cluster_pair_relation_conflict")
+                return False
+            if sig.direction != "out":
+                self._reject_edge(new_edge, "cluster_pair_timing_direction_conflict")
+                return False
+        elif new_edge.relation == "divergent":
+            if sig.relation != "divergent":
+                self._reject_edge(new_edge, "cluster_pair_relation_conflict")
+                return False
+        return True
+
+    def _check_divergent_not_ordered_by_timing(self, u: int, v: int, new_edge: Edge) -> bool:
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+        if self._cluster_reachable_by_rep(ru, rv) or self._cluster_reachable_by_rep(rv, ru):
+            self._reject_edge(new_edge, "cluster_pair_divergent_timing_transitive_conflict")
+            return False
+        if self.cluster_reach[ru] & self.cluster_reach[rv]:
+            self._reject_edge(new_edge, "cluster_pair_divergent_shared_timing_descendant_conflict")
+            return False
+        return True
+
+    def _check_timing_not_imply_divergent_conflict(self, u: int, v: int, new_edge: Edge) -> bool:
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return True
+
+        anc_bits = self.cluster_rev_reach[ru] | self.member_bits[ru]
+        desc_bits = self.cluster_reach[rv] | self.member_bits[rv]
+        for ancestor in self._bits_to_active_reps(anc_bits):
+            if self.divergent_neighbors[ancestor] & desc_bits:
+                self._reject_edge(new_edge, "cluster_pair_timing_implies_divergent_transitive_conflict")
+                return False
+        if self._has_divergent_ancestor_reaching_descendants(anc_bits, desc_bits):
+            self._reject_edge(new_edge, "cluster_pair_divergent_shared_timing_descendant_conflict")
+            return False
+        return True
+
+    # -------- Index updates --------
+
+    def _add_boundary(self, a: int, b: int, sig_from_a: BoundarySignature) -> None:
+        self.boundary[a][b] = sig_from_a
+        self.boundary[b][a] = sig_from_a.flipped()
+
+    def _add_divergent_boundary(self, a: int, b: int) -> None:
+        sig = BoundarySignature("divergent", None)
+        self._add_boundary(a, b, sig)
+        self.divergent_neighbors[a] |= self.member_bits[b]
+        self.divergent_neighbors[b] |= self.member_bits[a]
+
+    def _iter_reps_from_bits(self, bits: int) -> Iterable[int]:
+        return self._bits_to_active_reps(bits)
+
+    def _add_timing_boundary(self, a: int, b: int) -> None:
+        sig = BoundarySignature("timing", "out")
+        self._add_boundary(a, b, sig)
+
+        anc_bits = self.cluster_rev_reach[a] | self.member_bits[a]
+        desc_bits = self.cluster_reach[b] | self.member_bits[b]
+        for ancestor in self._iter_reps_from_bits(anc_bits):
+            self.cluster_reach[ancestor] |= desc_bits
+        for descendant in self._iter_reps_from_bits(desc_bits):
+            self.cluster_rev_reach[descendant] |= anc_bits
+
+    @staticmethod
+    def _iter_set_bits(bits: int) -> Iterable[int]:
+        while bits:
+            lsb = bits & -bits
+            bit = lsb.bit_length() - 1
+            yield bit
+            bits ^= lsb
+
+    def _merge_clusters(self, u: int, v: int) -> int:
+        ru, rv = self._find(u), self._find(v)
+        if ru == rv:
+            return ru
+
+        keep, drop = ru, rv
+        if self.size[keep] < self.size[drop]:
+            keep, drop = drop, keep
+
+        keep_bits_old = self.member_bits[keep]
+        drop_bits = self.member_bits[drop]
+        merged_bits = keep_bits_old | drop_bits
+        desc_union = (self.cluster_reach[keep] | self.cluster_reach[drop]) & ~merged_bits
+        anc_union = (self.cluster_rev_reach[keep] | self.cluster_rev_reach[drop]) & ~merged_bits
+
+        # Update reachability before remapping bit owners, while ancestor/descendant
+        # sets still resolve through the old active reps.
+        for ancestor in self._bits_to_active_reps(anc_union):
+            self.cluster_reach[ancestor] |= merged_bits | desc_union
+        for descendant in self._bits_to_active_reps(desc_union):
+            self.cluster_rev_reach[descendant] |= merged_bits | anc_union
+
+        self.parent[drop] = keep
+        self.size[keep] += self.size[drop]
+        self.cluster_nodes[keep].update(self.cluster_nodes[drop])
+        del self.cluster_nodes[drop]
+        del self.size[drop]
+
+        for bit in self._iter_set_bits(drop_bits):
+            self.bit_owner[bit] = keep
+
+        self.member_bits[keep] = merged_bits
+        del self.member_bits[drop]
+        self.cluster_reach[keep] = desc_union
+        self.cluster_rev_reach[keep] = anc_union
+        self.cluster_reach.pop(drop, None)
+        self.cluster_rev_reach.pop(drop, None)
+
+        self._merge_boundaries(keep, drop, merged_bits)
+        return keep
+
+    def _merge_boundaries(self, keep: int, drop: int, merged_bits: int) -> None:
+        keep_boundary = self.boundary.get(keep, {})
+        drop_boundary = self.boundary.get(drop, {})
+        affected_neighbors = set(keep_boundary) | set(drop_boundary)
+        affected_neighbors.discard(keep)
+        affected_neighbors.discard(drop)
+
+        for other, sig in list(drop_boundary.items()):
+            other = self._find(other)
+            if other == keep:
+                continue
+            self.boundary[other].pop(drop, None)
+            if other not in self.boundary[keep]:
+                self.boundary[keep][other] = sig
+                self.boundary[other][keep] = sig.flipped()
+            else:
+                # Keep the representative edge/signature that was already present
+                # on the kept cluster; pre-merge checks have already verified it is compatible.
+                self.boundary[other][keep] = self.boundary[keep][other].flipped()
+
+        self.boundary[keep].pop(drop, None)
+        self.boundary.pop(drop, None)
+
+        for other in affected_neighbors:
+            other = self._find(other)
+            if other == keep:
+                continue
+            sig = self.boundary.get(keep, {}).get(other)
+            if sig is not None and sig.relation == "divergent":
+                self.divergent_neighbors[other] &= ~merged_bits
+                self.divergent_neighbors[other] |= self.member_bits[keep]
+            else:
+                self.divergent_neighbors[other] &= ~merged_bits
+
+        div_bits = 0
+        for other, sig in self.boundary.get(keep, {}).items():
+            if sig.relation == "divergent":
+                div_bits |= self.member_bits[self._find(other)]
+        self.divergent_neighbors[keep] = div_bits & ~self.member_bits[keep]
+        self.divergent_neighbors.pop(drop, None)
+
+    # -------- Public API --------
+
+    def try_add_edge(self, edge: Edge) -> bool:
+        u, v = edge.u, edge.v
+        if u == v:
+            self._reject_edge(edge, "self_loop")
+            return False
+
+        self._ensure_node_dsu(u)
+        self._ensure_node_dsu(v)
+
+        key = (u, v) if u <= v else (v, u)
+        existing = self.pair_edge.get(key)
+        if existing is not None:
+            if existing.relation != edge.relation:
+                self._reject_edge(edge, "pair_type_conflict")
+                return False
+            if edge.relation == "timing":
+                if existing.u == edge.u and existing.v == edge.v:
+                    return False
+                self._reject_edge(edge, "pair_direction_conflict")
+                return False
+            return False
+
+        ru, rv = self._find(u), self._find(v)
+
+        if edge.relation == "cooccurring":
+            if not self._check_cooccurring_merge_internal_consistency(u, v, edge):
+                return False
+            if not self._check_cooccurring_merge_boundary_consistency(u, v, edge):
+                return False
+            if not self._check_cooccurring_merge_timing_acyclic(u, v, edge):
+                return False
+            if not self._check_cooccurring_merge_divergent_shared_descendant(u, v, edge):
+                return False
+        elif edge.relation == "timing":
+            if ru == rv:
+                self._reject_edge(edge, "cluster_internal_timing")
+                return False
+            if not self._check_cluster_pair_relation_ok(u, v, edge):
+                return False
+            if not self._check_timing_not_imply_divergent_conflict(u, v, edge):
+                return False
+            # Timing paths may pass through different cooccurring members.
+            if self._cluster_reachable_by_rep(rv, ru):
+                self._reject_edge(edge, "timing_cycle")
+                return False
+        elif edge.relation == "divergent":
+            if ru == rv:
+                self._reject_edge(edge, "cluster_internal_divergent")
+                return False
+            if not self._check_cluster_pair_relation_ok(u, v, edge):
+                return False
+            if not self._check_divergent_not_ordered_by_timing(u, v, edge):
+                return False
+        else:
+            raise ValueError(f"Unknown relation: {edge.relation}")
+
+        self._accept_edge(edge)
+        return True
+
+    def _accept_edge(self, edge: Edge) -> None:
+        u, v = edge.u, edge.v
+        ru, rv = self._find(u), self._find(v)
+        self.nodes.add(u)
+        self.nodes.add(v)
+        self._register_node_chrom(u, edge.chrom)
+        self._register_node_chrom(v, edge.chrom)
+        self._register_node_haplotype(u, edge.hap_u)
+        self._register_node_haplotype(v, edge.hap_v)
+        self._register_node_hp_reads(u, edge.hp_reads_u)
+        self._register_node_hp_reads(v, edge.hp_reads_v)
+        self._register_node_vaf(u, edge.vaf_u)
+        self._register_node_vaf(v, edge.vaf_v)
+
+        self.edges.append(edge)
+        self.pair_edge[(u, v) if u <= v else (v, u)] = edge
+        self.adj[u][v] = edge
+        self.adj[v][u] = edge
+
+        if edge.relation == "timing":
+            self._add_timing_boundary(ru, rv)
+        elif edge.relation == "divergent":
+            self._add_divergent_boundary(ru, rv)
+        elif edge.relation == "cooccurring":
+            self._merge_clusters(u, v)

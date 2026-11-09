@@ -16,7 +16,6 @@ class Edge:
     v: int                # pos2 in oriented graph (target)
 
     relation: str         # "cooccurring" | "timing" | "divergent"
-    loss: bool
     reliability: float    # RELIABILITY from C++ output
 
     alt_alt: int = 0
@@ -26,6 +25,8 @@ class Edge:
 
     vaf_u: float = 0.0    # VAF for u
     vaf_v: float = 0.0    # VAF for v
+    hvaf_u: Optional[float] = None  # Assigned-haplotype VAF for u
+    hvaf_v: Optional[float] = None  # Assigned-haplotype VAF for v
 
     best_score: float = 0.0   # BEST_SCORE from C++
     margin: float = 0.0       # MARGIN from C++
@@ -35,3 +36,11 @@ class Edge:
     hap_v: Optional[str] = None
     hp_reads_u: Optional[str] = None
     hp_reads_v: Optional[str] = None
+
+
+@dataclass
+class RejectedEdge:
+    """An edge excluded from inference, retained for reporting and display."""
+
+    edge: Edge
+    reason: str

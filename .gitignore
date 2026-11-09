@@ -1,0 +1,13 @@
+# Generated files and local build artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.o
+/evo/main
+
+# Experiments and their results are kept outside the production repository.
+/evo/ml/
+/evo/experimental/
+
+# Local regression tests are not included in the production repository.
+/evo/**/test_*.py
