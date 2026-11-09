@@ -1,7 +1,7 @@
 # EvoPhase: Phasing tumor mutations with bulk long-read sequencing
 
 EvoPhase infers local evolutionary relationships between somatic SNVs from their
-co-occurrence on tumor sequencing reads. It fits candidate mutation trees with
+co-occurrence on long-read tumor sequencing. It fits candidate mutation trees with
 expectation maximization (EM), detects evolutionary relationship between each mutation pair and builds chromosome-level phase graphs from these
 pairwise relationships.
 
